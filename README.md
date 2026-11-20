@@ -1,272 +1,87 @@
-# CarPlay WAN for Home Assistant
+<img src="docs/icon.png" width="88" align="right" alt="">
 
-[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20agent%20%2B%20integration-yellow)](#status-and-install)
-[![Tests](https://img.shields.io/badge/tests-87%20passing-success)](tests/)
-[![Coverage](https://img.shields.io/badge/integration%20coverage-99%25-success)](tests/)
-[![Verified](https://img.shields.io/badge/verified%20against-HA%202026.2.3-41BDF5)](#status-and-install)
-[![Quality scale](https://img.shields.io/badge/self--assessed-bronze%20%2B%20silver%20met-lightgrey)](custom_components/carplay_wan/quality_scale.yaml)
-[![CI](https://github.com/ParkWardRR/ha-carplay-wan/actions/workflows/ci.yml/badge.svg)](https://github.com/ParkWardRR/ha-carplay-wan/actions/workflows/ci.yml)
+# carplay-wan
+
+[![Status](https://img.shields.io/badge/status-alpha%20%C2%B7%20in%20use%20on%20two%20cars-yellow)](#status)
 [![License](https://img.shields.io/badge/license-Blue%20Oak%201.0.0-blue)](LICENSE.md)
-[![HACS](https://img.shields.io/badge/HACS-custom%20repository-41BDF5?logo=homeassistantcommunitystore&logoColor=white)](https://hacs.xyz/docs/publish/integration)
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.x%2B-41BDF5?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
-[![Python](https://img.shields.io/badge/integration-Python%203.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Go](https://img.shields.io/badge/add--on-Go%201.26-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![Tests](https://img.shields.io/badge/tests-48%20passing-success)](box/tests/)
+[![CI](https://github.com/ParkWardRR/ha-carplay-wan/actions/workflows/ci.yml/badge.svg)](https://github.com/ParkWardRR/ha-carplay-wan/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.11%20%C2%B7%20stdlib%20only-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Linux](https://img.shields.io/badge/runs%20on-Linux-FCC624?logo=linux&logoColor=black)](https://www.kernel.org/)
 [![CarPlay](https://img.shields.io/badge/CarPlay-wireless-000000?logo=appleplay&logoColor=white)](https://www.apple.com/ios/carplay/)
 [![BMW](https://img.shields.io/badge/measured%20on-BMW%20NBT%20EVO-1C69D4?logo=bmw&logoColor=white)](https://www.bmw.com/)
 [![Upstream](https://img.shields.io/badge/upstream-internet--over--wireless--carplay-6e5494?logo=github&logoColor=white)](https://github.com/ParkWardRR/internet-over-wireless-carplay)
 
-**Your parked car runs a Wi-Fi network. This turns it into a Home Assistant device — and gives the phone inside it a working internet connection.**
+**Your parked car runs a Wi-Fi network. This finds out what it will tell you, and turns that into something a home automation system can read.**
 
-Wireless CarPlay works by having the car run its own small Wi-Fi network for the phone to talk to the dashboard. That network is a cable replacement: it carries **no internet**. This project does two things with it that nobody is doing today.
+Wireless CarPlay works by having the car run its own small Wi-Fi network so the phone can talk to the dashboard. [internet-over-wireless-carplay](https://github.com/ParkWardRR/internet-over-wireless-carplay) puts a Linux box on that network and gives the phone a route to the internet, which is what makes Maps work in a garage with no cell signal.
 
-1. **It fixes the internet half.** A small Linux box joins that same car network and hands the phone a route out to your home connection. In an underground garage with no cell signal, Maps starts working again. The car is not modified and the phone's IP settings are not changed. This half is **already built and proven on two cars** — see [internet-over-wireless-carplay](https://github.com/ParkWardRR/internet-over-wireless-carplay).
-2. **It reads the car.** The same radio link is a rich, honest sensor. It knows when the car woke up, when it left, where it parked, who was driving, whether CarPlay was running and how hard it was working — all of it underground, where GPS, cellular and every cloud API are dead.
+This repository is the other half: **the same radio link is a sensor, and a surprisingly talkative one.** It knows when the car woke up, where it parked, who got in, and — it turns out — what car it is.
 
-> **For newcomers:** think of it as a motion sensor for your car that happens to also be a Wi-Fi router.
-> **For pros:** it is a `wpa_supplicant` STA on the head unit's AP, an RFC 4861 RA sender with NAT66, nftables isolation per car link, and an event stream from `nl80211` station dumps — surfaced as HA entities.
-
----
-
-## In one picture
-
-```mermaid
-flowchart LR
-  subgraph CAR["🚗 Car (unmodified)"]
-    HU["NBT EVO head unit<br/>AP · 172.16.224.1<br/>2.4 GHz ch 11"]
-    PH["iPhone<br/>CarPlay session"]
-  end
-
-  subgraph BOX["📦 Linux box in the garage"]
-    STA["USB radio per car<br/>(AR9271)"]
-    CD["carplayd<br/>route · isolation · shaping"]
-    PR["probe<br/>read-only discovery"]
-  end
-
-  subgraph HA["🏠 Home Assistant"]
-    IN["carplay_wan<br/>integration"]
-    EN["device_tracker · binary_sensor<br/>sensor · event"]
-  end
-
-  PH <-->|"CarPlay audio + screen"| HU
-  HU <-->|"relayed, no TDLS"| STA
-  STA --- CD
-  STA --- PR
-  CD -->|"IPv6 RA + NAT66"| PH
-  CD -->|"Ethernet"| NET((Internet))
-  CD -->|"metrics + events"| IN
-  PR -->|"what the car exposes"| IN
-  IN --> EN
-```
-
-Two data paths, one radio link. The **route** goes to the phone. The **telemetry** goes to Home Assistant.
+> **For newcomers:** a motion sensor for your car that works two floors underground, where GPS and every phone app are dead.
+> **For pros:** a state agent over `carplayd`'s event stream and metrics, plus a budgeted, read-only 802.11/IP discovery battery, exposed as JSON over HTTP and optional MQTT discovery.
 
 ---
 
-## What you get in Home Assistant
+## The headline finding
 
-The payoff first. Every row below is derived from something the upstream project already measures on real cars.
+**The car announces what it is, in the clear, in every beacon.** Measured 2026-11-19 on an F32.
 
-| Entity | Type | What it tells you | Confidence |
-|---|---|---|---|
-| `device_tracker.f32` | device_tracker | **Car is home / away.** Works in a basement where GPS and cellular do not | ✅ measured |
-| `binary_sensor.f32_awake` | binary_sensor | **Ignition or accessory is on.** The CarPlay AP only exists while the car is awake; it stops beaconing seconds after you switch off | ✅ measured |
-| `binary_sensor.f32_carplay_active` | binary_sensor | A phone is actually in a CarPlay session, not just nearby | ✅ measured |
-| `binary_sensor.f32_internet_validated` | binary_sensor | iOS has accepted the link and **apps will use it**. The single most useful bit in the whole system — see [the tap](#the-tap-the-one-thing-that-catches-everyone) | ✅ measured |
-| `sensor.f32_signal` | sensor (dBm) | Link strength. In practice a **parking-position** proxy: a car six feet left of usual reads 10 dB different | ✅ measured |
-| `sensor.f32_driver` | sensor | **Which phone attached**, by MAC → who is driving | ✅ measured |
-| `sensor.f32_session_duration` | sensor (s) | How long the car has been awake this time | ✅ measured |
-| `sensor.f32_forwarded_bytes` | sensor (B) | What the phone pulled through your house | ✅ measured |
-| `sensor.f32_carplay_airtime` | sensor (%) | How much of the channel CarPlay is eating. Median **26.5%** on these cars | ✅ measured |
-| `sensor.f32_link_rate` | sensor (Mbit/s) | Negotiated MCS rate — the honest health number on this hardware | ✅ measured |
-| `sensor.f32_head_unit` | sensor | Head unit BSSID, OUI, negotiated ciphers, Wi-Fi generation | ✅ measured |
-| `event.f32_arrival` / `event.f32_departure` | event | Timestamped trip boundaries, with signal trace | ✅ measured |
-| `sensor.f32_services` | sensor | What the head unit advertises on the link (mDNS, open ports) | 🔬 **research — see [Q2](#q2-what-does-the-head-unit-actually-expose)** |
+Decoding the Apple Device information element out of the beacon gives:
 
-**Automations this makes trivial, that are hard today:** open the garage door when the car wakes up two floors underground; turn the house lights on *when the engine starts* rather than when a phone's GPS drifts near home; log every trip's start and end with no OBD dongle and no manufacturer cloud account; alert when a car has been awake for 20 minutes without leaving (someone sitting in the garage with the engine running).
+| Field | Value |
+|---|---|
+| Name | `BMWCarPlay` |
+| Manufacturer | `BMW` |
+| Model | `F32-NBTEvo-0716` — chassis, head unit, and what looks like a build date |
+| Also | the head unit's BSSID, and a second MAC that is almost certainly its Bluetooth radio |
+
+This needs **no password, no association, and transmits nothing.** A radio listening on channel 11 can identify the make, chassis and head unit of any car that wakes up nearby. It is also almost certainly not BMW-specific: the Apple Device element is a CarPlay mechanism.
+
+It corrects the upstream project, which recorded "no Apple Device IE" as measured fact. There is one, and it is in the beacon.
 
 ---
 
-## How it works
-
-### Half one: the route (built, proven)
-
-The car hands out IPv4 with **no router and no DNS**, and sends no router advertisements of its own. So the box does not fight it — it leaves IPv4 alone and becomes the only IPv6 router on the link, advertising a ULA prefix, itself as the gateway, and a DNS server, then NATs out to the house over Ethernet. The phone picks that up with plain SLAAC. Nothing is configured on the phone.
-
-```mermaid
-stateDiagram-v2
-    [*] --> Away
-    Away --> Seen: AP starts beaconing<br/>(car switched on)
-    Seen --> Connected: WPA2-PSK, ch 11
-    Connected --> Serving: RA sent, route up
-    Serving --> Validated: iOS probes and accepts<br/>apps can now use it
-    Validated --> Leaving: signal cliff<br/>(driving out)
-    Serving --> Leaving: signal cliff
-    Leaving --> Away: goodbye RA<br/>route withdrawn cleanly
-    Serving --> Away: link died unannounced
-    Validated --> Serving: phone deranks the link
-```
-
-Every transition in that diagram is an event the integration turns into an HA state change. The hard-won part is `Leaving`: departures from a basement garage do not fade politely, the signal stays flat and then the link simply dies — so leaving *early enough to say goodbye* took three instrumented drives to get right, and is [still not fully solved](#q4-what-signal-replaces-a-counter-the-driver-does-not-implement).
-
-### Half two: the telemetry (this repo's new work)
-
-```mermaid
-sequenceDiagram
-    participant C as Car
-    participant B as Box
-    participant H as Home Assistant
-    Note over C: driver presses START
-    C->>B: beacon appears
-    B->>H: device_tracker → home · awake → on
-    Note over B: ~0.3 s
-    C->>B: association (WPA2-PSK/CCMP)
-    B->>H: head unit BSSID, ciphers, rate
-    B->>C: IPv6 RA (prefix, route, DNS)
-    B->>H: serving → on
-    C->>B: phone associates, CarPlay starts
-    B->>H: driver = <phone>, carplay_active → on
-    C->>B: iOS validation probe
-    B->>H: internet_validated → on ✅
-    loop every 2 s while parked
-        B->>H: signal, rate, bytes, airtime
-    end
-    Note over C: driver switches off
-    C->>B: deauth reason=3 (sta_leaving)
-    B->>H: departure event + awake → off
-```
-
-The integration never talks to the car. It consumes what the box already produces: a Prometheus endpoint (`carplayd_serving`, `carplayd_signal_dbm`, `carplayd_phones`, `carplayd_phone_probe_bytes`, `carplayd_phone_forward_bytes`, `carplayd_detect_seconds`, `carplayd_upstream`, `carplayd_events_total`) and a structured event log. The planned transport is a thin local API plus MQTT discovery, so the box and HA do not have to be the same machine.
-
----
-
-## What you can and cannot learn about a car over Wi-Fi
-
-**This is the section to read before you get excited.** The honest answer has three tiers, and most people assume tier 3 is available when it is not.
+## What else the link will tell you
 
 ```mermaid
 flowchart TB
-  subgraph REACH["✅ Reachable from the CarPlay Wi-Fi"]
-    A1["RF and link layer<br/>presence · RSSI · rates · airtime · timing"]
-    A2["IP layer on the AP<br/>DHCP · relayed client traffic · mDNS?"]
-    A3["Head unit as a host<br/>whatever it chooses to expose"]
+  subgraph PASSIVE["Listening only — no password, nothing transmitted"]
+    A1["Presence · wake · sleep<br/>arrival and departure, to the second"]
+    A2["Signal strength<br/>in practice, a parking-spot fingerprint"]
+    A3["Make · chassis · head unit<br/>from the Apple Device element"]
   end
 
-  subgraph GAP["🚫 Not reachable — by design, and correctly so"]
-    B1["K-CAN / FlexRay / PT-CAN<br/>the vehicle buses"]
-    B2["Odometer · fuel · SoC · TPMS<br/>doors · locks · engine · DTCs"]
+  subgraph JOINED["Once the box is on the network"]
+    B1["Which phone attached<br/>= who is driving"]
+    B2["CarPlay session, bytes moved,<br/>link rate, channel airtime"]
+    B3["Whether iOS accepted the route<br/>the thing that decides if apps work"]
   end
 
-  A3 -.->|"no route, no bridge:<br/>infotainment is firewalled<br/>from the bus"| B1
-  B1 --- B2
+  subgraph ASKED["Only if you ask the head unit directly"]
+    C1["ICMP: it answers"]
+    C2["TCP services: unknown"]
+  end
 
-  OBD["OBD-II ENET / BLE dongle<br/>a separate project"] --> B1
+  subgraph NEVER["Not on this network, at any price"]
+    D1["Odometer · fuel · SoC · TPMS<br/>doors · locks · DTCs"]
+  end
+
+  ASKED -. "infotainment is firewalled<br/>from the vehicle bus,<br/>and correctly so" .-> NEVER
+  OBD["OBD-II dongle<br/>a separate project"] --> D1
 ```
 
-### Tier 1 — certain, already measured
+### What is not on this network, and never will be
 
-Presence, wake/sleep, arrival and departure timestamps, dwell time, signal strength and its trajectory, which phones attached and when, CarPlay session activity, negotiated ciphers and Wi-Fi generation, link rates, channel occupancy, bytes moved, and whether iOS validated the route. All of this is observable from the box with no cooperation from the car, and the upstream project has logs of every one of it on two vehicles.
+Odometer, fuel level, state of charge, tyre pressures, doors, locks, DTCs, VIN. Those live on the vehicle bus. Infotainment Wi-Fi is not bridged to K-CAN or FlexRay, and that separation is a safety property you should want. Published BMW head-unit research reaches the bus by a different physical path — [KeenLab](https://keenlab.tencent.com/en/whitepapers/Experimental_Security_Assessment_of_BMW_Cars_by_KeenLab.pdf) found the NBT acting as a gateway over **USB Ethernet**, not over the CarPlay AP.
 
-### Tier 2 — plausible, unverified, and the interesting research
-
-CarPlay's own service discovery runs over **Bonjour/mDNS**, with several TCP streams for AirPlay and a UDP stream for time sync ([TROOPERS 2024 analysis](https://troopers.de/downloads/troopers24/TR24_Apple_CarPlay-What's_Under_the_Hood_8MCYKG.pdf)). That means there is almost certainly an mDNS responder on the link. What an NBT EVO advertises in its TXT records — firmware string, model, capabilities, vehicle identifiers — **has never been published, and we have not looked yet.** That is [Q2](#q2-what-does-the-head-unit-actually-expose), and it is the single highest-value experiment in this repository.
-
-### Tier 3 — not available here, and do not let anyone tell you otherwise
-
-Odometer, fuel level, state of charge, tyre pressures, door and lock states, DTCs, VIN beyond the five digits in the SSID, and anything else from the vehicle bus **are not on this network**. Infotainment Wi-Fi is deliberately not bridged to K-CAN or FlexRay, and that separation is a safety property you should want. Published BMW head-unit research reaches the bus through a *different* physical path — KeenLab found the NBT acting as a gateway at `192.168.0.1` over **USB Ethernet**, not over the CarPlay AP ([KeenLab, 2018](https://keenlab.tencent.com/en/whitepapers/Experimental_Security_Assessment_of_BMW_Cars_by_KeenLab.pdf); [Black Hat USA 2019](https://i.blackhat.com/USA-19/Thursday/us-19-Cai-0-Days-And-Mitigations-Roadways-To-Exploit-And-Secure-Connected-BMW-Cars-wp.pdf)).
-
-**If you want bus data, use an OBD-II dongle and a separate integration, and let this one do what only it can do.** The two complement each other cleanly: OBD-II tells you the car's internals while it is running; this tells you the car is *there*, underground, where the dongle's uplink has no signal.
+**If you want bus data, use an OBD-II dongle.** The two complement each other: OBD tells you the car's internals while it runs; this tells you the car is *there*, underground, where the dongle's uplink has no signal.
 
 ---
 
-## The tap: the one thing that catches everyone
+## What the agent reports
 
-iOS gives a CarPlay network the **lowest possible service rank**. It gets a limited route that background daemons use and your apps ignore. The box can be working perfectly and Maps will still fail — on one instrumented drive, 1.36 MB moved through the box and not one user-facing app touched it.
-
-The fix is one tap, once: **Settings → Wi-Fi → the car's network → Check For Internet Access → Use For Internet.**
-
-| | |
-|---|---|
-| Does iOS re-validate by itself afterwards? | **Usually.** Across absences of 15–29 minutes, validation returned **4–24 s** after the box resumed serving, with no tap |
-| Always? | **No.** Two sessions in one morning never validated and moved zero bytes, and a 54-minute car restart needed the tap again |
-| So? | Treat the tap as required and the re-check as a bonus. `binary_sensor.*_internet_validated` exists precisely so Home Assistant can tell you which state you are in, instead of you guessing from a dead Maps screen |
-
-This is also why the integration exposes validation as a first-class entity rather than burying it: **a notification saying "the car has no working route, tap the switch" is worth more than any other automation here.**
-
----
-
-## Hardware
-
-| Part | Why | Notes |
-|---|---|---|
-| A small Linux box | Runs the add-on | Raspberry Pi, Orange Pi, or the HA host itself if it is Linux with USB |
-| **One 2.4 GHz USB Wi-Fi adapter per car** | A radio cannot serve two cars at once | AR9271 (`ath9k_htc`) is the known-good, ~$15. **They cannot be shared** |
-| Wired Ethernet to the box | The uplink the phone borrows | Wi-Fi uplink on the same band will fight the car link |
-| An iPhone on **iOS 27+** | *Use For Internet* does not exist before it | Required for the route half, not the telemetry half |
-| The car's CarPlay Wi-Fi password | To join at all | Settings → Wi-Fi → Edit → Known Networks → the car → Password. No jailbreak |
-
-**Telemetry-only mode needs none of the above except a radio.** If you do not care about the internet half, the box can watch the car's beacons without ever associating — you get presence, wake/sleep, RSSI and timing with no password and no route. That is a planned first-class mode, because it is the fastest possible path to value and has no failure modes that can touch CarPlay.
-
----
-
-## Status and install
-
-**Alpha.** The agent and the integration both exist and both have been run against real hardware. What has *not* happened is a week of real driving, which is the gate in the roadmap. Treat it as something to try, not something to depend on.
-
-| Piece | State |
-|---|---|
-| `box/carplay_wan_agent.py` | Runs. 23 unit tests on fixtures copied from real logs; verified against the live box |
-| `box/probe/headunit_probe.py` | Nine probes, fired on arrival. Parsers tested against a real beacon; pipeline verified on the box. **Has not yet caught a car** — see [the probe battery](#the-probe-battery) |
-| `custom_components/carplay_wan` | **45 tests, 99% coverage** against **Home Assistant 2026.2.3**; every entity key verified against a live agent payload |
-| End-to-end in a running HA | ⬜ **not yet done.** Nobody has clicked through the config flow on a real install |
-
-**Quality scale: no tier, and that is the honest answer.** Home Assistant's [integration quality scale](https://contributors.home-assistant.io/core/quality-scale/) grades *core* integrations — hassfest enforces it inside the core repository, and `custom` is the manifest value for everything outside it. Nothing official grades a HACS integration. The rules are still the best checklist there is, so [`quality_scale.yaml`](custom_components/carplay_wan/quality_scale.yaml) fills in all 54 of them as if this were being reviewed: **32 done, 9 exempt, 13 todo — every Bronze and Silver rule met.** That is a self-assessment and not a tier, but it is not self-marked either: [CI](.github/workflows/ci.yml) runs `hassfest` and the HACS validator on every push, which is the closest thing to an independent opinion a custom integration can get. Gold is deliberately still open; `repair-issues` and `docs-troubleshooting` deserve real thought rather than box-ticking.
-
-### 1. The agent, on the box
-
-It reads what carplayd already knows and serves one JSON endpoint. Standard library only — the box has Python 3.11 and nothing installed, and it stays that way.
-
-```sh
-sudo install -m 755 box/carplay_wan_agent.py       /usr/local/bin/
-sudo install -m 755 box/probe/headunit-probe.sh    /usr/local/libexec/
-sudo install -m 600 box/agent.example.env          /etc/carplay-wan-agent.env   # edit this
-sudo install -m 644 box/carplay-wan-agent.service  /etc/systemd/system/
-sudo systemctl enable --now carplay-wan-agent
-```
-
-Check it before going near Home Assistant. `--once` prints a snapshot and exits:
-
-```sh
-sudo carplay_wan_agent.py --car A=F32 --car B=F22 --once
-```
-
-**Watch mode needs no password and never associates** — beacons only, so it cannot disturb CarPlay. This is the whole product if you only want to know whether the car is home, and it should work on any car whose AP appears when it wakes:
-
-```sh
-sudo carplay_wan_agent.py --car A=F32="BMW00000 CarPlay" --watch-dev cara
-```
-
-### 2. The integration, in Home Assistant
-
-HACS → ⋮ → Custom repositories → `https://github.com/ParkWardRR/ha-carplay-wan`, type Integration. Then **Settings → Devices & Services → Add Integration → CarPlay WAN**, and give it the box's address and port 8099. No YAML. One device per car.
-
-Prefer not to install a custom integration? Start the agent with `--mqtt-host` and it publishes MQTT discovery instead; stock HA builds the same entities with no custom code. The HTTP endpoint and MQTT are two transports over one state machine, not two implementations.
-
-### Uninstalling
-
-Removing the config entry in Home Assistant removes the entities. It does **not** touch the box, which is the part people forget:
-
-```sh
-sudo systemctl disable --now carplay-wan-agent
-sudo rm /etc/systemd/system/carplay-wan-agent.service /etc/carplay-wan-agent.env
-sudo rm /usr/local/bin/carplay_wan_agent.py /usr/local/libexec/headunit-probe.sh
-sudo rm -rf /var/lib/carplay-wan      # state, probe results, and the redaction salt
-sudo systemctl daemon-reload
-```
-
-`carplayd` itself is untouched by all of this — the agent only ever read from it.
-
-### What it looks like on the wire
+`box/carplay_wan_agent.py` keeps a state machine per car and serves it as JSON over HTTP, with optional MQTT discovery for anything that speaks it.
 
 ```json
 { "agent": { "version": "0.1.0", "metrics_ok": true, "redacted": true },
@@ -277,214 +92,189 @@ sudo systemctl daemon-reload
                    "state": "home" } } }
 ```
 
-`head_unit` is hashed with a per-install salt. That is the default, and `--reveal` is the only way to change it.
+| Field | Means |
+|---|---|
+| `present` | The AP is beaconing, which it only does while the car is awake. **Ignition proxy.** |
+| `state` | `home` / `not_home` — works in a basement, which no GPS tracker does |
+| `validated` | iOS has accepted the link and **apps will actually use it**. The single most useful bit here |
+| `serving` | The box is advertising a route to the phone |
+| `signal_dbm` | Link strength; in practice a parking-position fingerprint |
+| `phones` | How many phones attached — and which, if you ask for it |
+| `forwarded_bytes` | What the phone pulled through your house |
+| `head_unit` | BSSID, hashed by default |
+| `last_departure_reason` | `car switched off`, `left on trend`, `link dropped (inactivity)` |
+
+`head_unit` is hashed with a per-install salt. That is the default; `--reveal` is the only way to change it, and it warns when you do.
+
+### The session, as the box sees it
+
+```mermaid
+stateDiagram-v2
+    [*] --> Away
+    Away --> Seen: AP starts beaconing<br/>(car switched on)
+    Seen --> Connected: WPA2-PSK, ch 11
+    Connected --> Serving: route advertised
+    Serving --> Validated: iOS probes and accepts<br/>apps can now use it
+    Validated --> Leaving: signal cliff, or<br/>the car is switched off
+    Serving --> Leaving: same
+    Leaving --> Away: AP stops beaconing
+```
 
 ---
-
-## What is in here
-
-```
-box/                            runs on the Linux box, not in Home Assistant
-  carplay_wan_agent.py          the state machine. stdlib only, Python 3.11+
-  carplay-wan-agent.service     systemd unit, hardened
-  agent.example.env             configuration; a secret, because of the SSID
-  probe/headunit_probe.py       Q2: nine read-only probes, fired on arrival
-  tests/test_agent.py           23 tests on fixtures copied from real logs
-  tests/test_probe.py           19 tests, incl. a real beacon off the air
-custom_components/carplay_wan/  the HACS integration
-  coordinator.py                polls the agent. never talks to the car
-  device_tracker.py             is the car home
-  binary_sensor.py              awake · route up · internet validated
-  sensor.py                     signal · phones · bytes · rate · head unit
-  diagnostics.py                redacted twice, on purpose
-hacs.json  manifest.json        HACS and Home Assistant metadata
-```
-
-The split is the design. Anything that touches the car link lives on the box, where airtime can be reasoned about; Home Assistant polls a JSON endpoint on the LAN and never goes near the car's channel.
 
 ## The probe battery
 
-Nine probes, run in this order the moment a car wakes up, cheapest and most
-valuable first. The ordering is not cosmetic: a session can be eleven seconds
-long, and whatever has not run by the time the car is switched off did not run.
+Ten probes, fired automatically the moment a car wakes, cheapest and most valuable first. The ordering is not cosmetic: a session can be eleven seconds long, and whatever has not run by the time the car is switched off did not run.
 
-| # | Probe | Sends | What it could tell us |
+| # | Probe | Sends | Result so far |
 |---|---|---|---|
-| 1 | `link` | nothing | BSSID, SSID, frequency, signal, negotiated rates |
-| 2 | `beacon_ies` | nothing | **The full raw information elements**, read out of the supplicant's own cache. Country, channel, HT/VHT/HE, RSN, every vendor element, 802.11u, and whatever WPS the beacon carries |
-| 3 | `probe_wps` | 2 frames | **The best shot at naming the car.** A directed probe request carrying a WPS element — what any WPS-capable phone emits while scanning. The answer can contain manufacturer, model name, model number, serial number and device name |
-| 4 | `station` | nothing | Per-station counters, MCS rates, beacon loss |
-| 5 | `neighbours` | nothing | Who else is on the link, from the neighbour caches |
-| 6 | `reachability` | 3 pings | Round trip to the head unit — **and the gate for everything after it** |
-| 7 | `dhcp` | 1 frame | One DISCOVER, read the OFFER, never REQUEST. Vendor class (60), vendor specific (43), hostname (12), domain (15) |
-| 8 | `mdns` | a browse | CarPlay discovery is Bonjour, so there is a responder here. AirPlay TXT records commonly carry `model`, `manufacturer`, `srcvers`, `deviceid` |
-| 9 | `tcp_ports` → `http_info` | 1 connect per port | A short port list, then `GET /info` on anything that answered — the AirPlay endpoint that returns a device description |
+| 1 | `link` | nothing | ✅ BSSID, SSID, frequency, signal, rates |
+| 2 | `beacon_ies` | nothing | ✅ **The whole raw element blob** — and the Apple Device IE above |
+| 3 | `probe_wps` | 2 frames | ⚠️ rejected by the driver so far (`EINVAL`/`ENOBUFS`), cause not found |
+| 4 | `station` | nothing | ✅ per-station counters, MCS rates, beacon loss |
+| 5 | `neighbours` | nothing | ✅ who else is on the link |
+| 6 | `reachability` | a few pings | ✅ phone answers at ~23 ms; **head unit answers ICMP**; no IPv6 on its side |
+| 7 | `dhcp` | 1 frame | ❌ no offer in 12 s — it does not hand addresses to just anyone |
+| 8 | `mdns` | nothing | ❌ **zero Bonjour on the link** mid-session, confirmed with `tcpdump` |
+| 9 | `tcp_ports` → `http_info` | 1 connect per port | ⬜ needs `--head-unit`; not yet run |
 
-**Why `probe_wps` has to ask rather than listen.** A beacon's WPS element is
-nearly empty. In one snapshot of this channel, **1 of 13** access points
-advertised WPS at all, and that one carried four attributes — version, state,
-RF bands, a vendor extension — naming nothing (measured). The attributes that
-identify a device are only required in a **probe response to a request that
-itself advertises WPS** (source: the WPS specification). So the probe asks.
+**Why `probe_wps` asks rather than listens.** A beacon's WPS element is nearly empty — of 13 access points on this channel, one advertised WPS at all, carrying version, state and RF bands, naming nothing (measured). The attributes that identify a device are only required in a probe response to a request that itself advertises WPS (source: the WPS specification). It asks from the *idle sibling radio*, which is already hunting that channel, so it never disturbs the association carrying CarPlay.
 
-**And it asks from the other radio.** With one radio per car, the idle one is
-already hunting this channel. Sending the probe from there costs airtime that
-was being spent anyway and never disturbs the association that is carrying
-CarPlay. If there is no idle sibling, the probe refuses to run rather than
-scan on the radio serving the car.
+**The mDNS result killed a hypothesis.** CarPlay's service discovery is Bonjour, so there should be a responder on the link. There is not — zero packets on port 5353 in twelve seconds, verified two ways. The discovery most likely happens as the phone joins, and everything after that is unicast between phone and head unit. The probe should listen from the first second rather than the eighth.
 
 ### What stops it
 
-Every active probe is gated, because the failure mode here is not a bad
-reading — it is dropping someone's CarPlay session. Upstream measured that
-saturating this head unit's relay **drops CarPlay entirely and needs a hard
-reset to re-pair**, and CarPlay already uses about a quarter of the channel.
+The failure mode here is not a bad reading. It is dropping someone's CarPlay session: upstream measured that saturating this head unit's relay **drops CarPlay entirely and needs a hard reset to re-pair**, and CarPlay already uses about a quarter of the channel.
 
-- **A pacer.** No more than 8 packets per second across the whole suite.
-- **A budget.** 75 seconds total. A probe that cannot finish does not start,
-  and says so — a half-finished probe looks like an answer.
-- **A latency gate.** `reachability` runs sixth, before anything expensive.
-  If the round trip is already over 400 ms, or the head unit does not answer,
-  every remaining active probe is skipped and the report says why.
-- **Read-only, always.** It asks. It never writes, pairs, or authenticates.
+- **A pacer** — no more than 8 packets per second across the whole suite.
+- **A budget** — 75 seconds. A probe that cannot finish does not start, because a half-finished probe looks like an answer.
+- **A latency gate** at step six. Only a *measured* bad round trip stops the rest; silence does not, because devices are entitled to ignore pings. (The first version got this backwards and cancelled everything.)
+- **Read-only, always.**
 
-### Running it by hand
+### Talking to the head unit
+
+The head unit answers ARP and ICMP. Everything that looked like silence was ours:
+
+- the car link is IPv6-only by design, so there is no IPv4 source address;
+- the house uses the same `172.16.224.0/24`, so `ip route get 172.16.224.1` answers `dev eth0` — IPv4 aimed at the car was leaving through the house;
+- `carplayd`'s isolation rule `iifname "cara" drop` discards everything inbound from the car link, including replies to our own pings. `tcpdump` taps before netfilter and saw them arrive; the box then threw them away.
+
+`--head-unit` opens the narrowest thing that works: one address added with **`noprefixroute`** — load-bearing rather than tidy, since an ordinary `ip addr add` installs a route that hijacks every packet the box sends to that range, including real traffic to the house — plus one stateful rule admitting replies to conversations the box starts. The car link still cannot initiate anything inbound.
+
+It is **off by default and never fires automatically**, because it relaxes a security boundary and that should be a per-run human decision. Teardown runs in a `finally`, is verified by re-reading the firewall and the interface, reports each failure separately, and refuses to touch an address it did not add. Six of the tests are about teardown alone.
 
 ```sh
-headunit_probe.py A --dry-run     # exactly what would run, sends nothing
-headunit_probe.py A --self-test   # decode beacons already heard; needs no car
-headunit_probe.py A               # the real thing, when a car is awake
+headunit_probe.py A --dry-run       # exactly what would run, sends nothing
+headunit_probe.py A --self-test     # decode beacons already heard; needs no car
+headunit_probe.py A                 # the standard battery, when a car is awake
+headunit_probe.py A --head-unit     # also talk to the head unit directly
 ```
 
-`--self-test` exists because the real target is available for seconds at a
-time, and a parser that has never met a real beacon is a parser that will fail
-on the one that matters. On the garage box it decodes eleven neighbouring
-access points and sends nothing.
+---
 
-## Privacy and secrets — read this before you publish anything
+## Install
 
-This project's upstream leaked secrets twice, and the lessons are baked in here from the start rather than learned again.
+Standard library only. The box has Python 3.11 and nothing installed, and it stays that way.
 
-- **The SSID contains the last five digits of your VIN.** `BMW12345 CarPlay` is not a neutral string. The integration must redact it by default in logs, diagnostics and entity attributes, and the repo must never carry a real one.
-- **The PSK is a credential to a network inside your car.** It belongs in Home Assistant's secret storage, never in YAML you share, never in a diagnostics dump, never in an issue report.
-- **MAC addresses identify people.** "Which phone attached" is "who was driving". That entity is genuinely useful and genuinely sensitive; it will be opt-in, hashed by default, with the raw value behind an explicit setting.
-- **Diagnostics downloads are the trap.** HA's `async_get_config_entry_diagnostics` is the most common way a project like this leaks a credential, because users paste them into public issues. Redaction there is a correctness requirement, not a nicety, and it gets a test.
-- **Scanning.** Any discovery this repository ships is read-only, rate-limited and confined to the car link — and it runs against **a head unit you own**. The nftables policy from upstream already permits the car link to reach the internet and nothing else: not the box, not the home LAN, not the other car.
+```sh
+sudo install -m 755 box/carplay_wan_agent.py       /usr/local/bin/
+sudo install -m 755 box/probe/headunit_probe.py    /usr/local/libexec/
+sudo install -m 600 box/agent.example.env          /etc/carplay-wan-agent.env   # edit
+sudo install -m 644 box/carplay-wan-agent.service  /etc/systemd/system/
+sudo systemctl enable --now carplay-wan-agent
+```
+
+Check it before wiring anything to it:
+
+```sh
+sudo carplay_wan_agent.py --car A=F32 --car B=F22 --once
+```
+
+**Watch mode needs no password and never associates** — beacons only, so it cannot disturb CarPlay. Given the Apple Device element, this now yields presence *and* the car's identity, for any car, with no credentials:
+
+```sh
+sudo carplay_wan_agent.py --car A=F32="BMW00000 CarPlay" --watch-dev cara
+```
+
+Point anything that reads JSON at `http://<box>:8099/state`, or start the agent with `--mqtt-host` and it publishes MQTT discovery instead.
+
+### Uninstalling
+
+```sh
+sudo systemctl disable --now carplay-wan-agent
+sudo rm /etc/systemd/system/carplay-wan-agent.service /etc/carplay-wan-agent.env
+sudo rm /usr/local/bin/carplay_wan_agent.py /usr/local/libexec/headunit_probe.py
+sudo rm -rf /var/lib/carplay-wan      # state, probe reports, and the redaction salt
+sudo systemctl daemon-reload
+```
+
+`carplayd` is untouched by all of this — these tools only ever read from it.
 
 ---
+
+## Privacy and secrets
+
+This project's upstream leaked secrets twice. The lessons are built in rather than relearned.
+
+- **The SSID contains the last five digits of your VIN.** `BMW12345 CarPlay` is not a neutral string.
+- **MAC addresses identify people.** "Which phone attached" is "who was driving". Hashed with a per-install salt kept `0600` on the box; `--reveal` is opt-in and warns.
+- **Probe reports contain identifiers** — BSSIDs, possibly a serial number. Written `0600`, and the tool says so on every run. Scrub before sharing.
+- **The fixtures in this repo are sanitised.** `box/tests/fixtures/` holds a real beacon captured off the air from a *neighbour's* access point with the SSID replaced; the fixture's own README says exactly what was removed and why nothing else needed to be.
+
+---
+
+## Status
+
+| Piece | State |
+|---|---|
+| `carplay_wan_agent.py` | **In use** on the garage box. 29 tests on fixtures copied from real logs |
+| `headunit_probe.py` | **In use**, fires on arrival and again after shutdown. 19 tests, parsers run against a real beacon |
+| `--head-unit` mode | Built and tested, **not yet run against a car** |
+| A week of real driving | ⬜ the gate. Not done |
 
 ## Roadmap
 
-Ordered so the cheapest thing that could kill an idea runs first, and so nothing starts before the thing that justifies it has passed.
-
-```mermaid
-flowchart LR
-  P0["P0 · Watch-only<br/>presence from beacons<br/>no PSK, no route"] --> P1
-  P1["P1 · Read the box<br/>metrics + events → MQTT<br/>entities in HA"] --> P2
-  P2["P2 · Ship it<br/>HACS + add-on<br/>config flow, diagnostics"] --> G
-  G{{"GATE<br/>a week of real driving<br/>with no false states"}} --> P3
-  P3["P3 · Discovery<br/>what does the head unit expose?<br/>Q1-Q3"] --> P4
-  P4["P4 · Inference<br/>parking spot, driver ID,<br/>trip log, anomaly alerts"] --> P5
-  P5["P5 · Fleet<br/>two cars, two boxes,<br/>failover, other makes"]
-```
-
-| # | Phase | Delivers | Accepted when |
-|---|---|---|---|
-| **P0** | **Watch-only presence** | ◐ **built** (`--watch-dev`): scans one channel for the car's beacon, no association, no password, no route | ⬜ A car's arrival and departure reflected in HA within 5 s, across 20 consecutive trips, with zero false "away" while parked. **Not yet run against a car** |
-| **P1** | **Read the box** | ◐ **built**: tier-1 entities from carplayd's metrics and event log, over HTTP *and* MQTT discovery | ⬜ Every entity in [the table](#what-you-get-in-home-assistant) populates on a real car, and survives a box restart and an HA restart without orphaned entities |
-| **P2** | **Ship it** | ◐ `hacs.json`, manifest, config flow, redacted diagnostics and tests exist. Missing: the add-on wrapper and a release | ⬜ A clean HA install can add it from HACS and reach a working state with no YAML and no shell access |
-| **GATE** | **A week of real driving** | Nothing. This is the gate | Seven days, two cars, no false presence, no stuck sensors, no entity spam in the recorder, and a diagnostics dump that is provably clean of PSK, SSID digits and raw MACs |
-| **P3** | **Discovery** | Answers to [Q1–Q3](#open-questions): mDNS inventory, port fingerprint, beacon elements. `sensor.*_services` moves from research to measured | Three or more head units surveyed, with a published, reproducible method and a decoder in the repository |
-| **P4** | **Inference** | Parking-spot classification from RSSI fingerprints, driver identification, a trip log, and anomaly alerting ("awake 20 min, never left") | Each inference carries a stated accuracy measured against ground truth the owner recorded, not a vibe |
-| **P5** | **Fleet** | Two boxes with bounded failover, more than two cars, and a porting guide for other makes | A second make of head unit works, or the guide explains precisely why it cannot |
-
----
+| # | Phase | Accepted when |
+|---|---|---|
+| **P0** | **Watch-only** — presence and identity from beacons alone, no PSK, no association | Arrival and departure correct across 20 consecutive trips, zero false "away" while parked |
+| **P1** | **Finish the battery** — run `--head-unit` on a live car; move the mDNS listen to the first second | A published port list, and a yes/no on Bonjour at join time |
+| **GATE** | **A week of real driving** | Seven days, two cars, no false presence, no stuck state, and a report provably clean of PSK, SSID digits and raw MACs |
+| **P2** | **Inference** — parking-spot classification from RSSI, driver identification, trip log | Each inference carries an accuracy measured against ground truth, not a vibe |
+| **P3** | **Other makes** — the Apple Device element should generalise | A second make identified from its beacon, or a clear explanation why not |
 
 ## Open questions
 
-Research that has not been done, written so somebody can actually do it. Each one states what is unknown, why it matters, and what would settle it.
+**Q1. Can presence be read with no credential at all?** Partly answered: the beacon carries identity, so watch-mode has more to work with than planned. Unmeasured: how reliable arrival and departure detection is from beacons alone over 20 trips.
 
-### Q1. Can presence be read without ever joining the car's network?
-**Unknown:** how reliably a passive monitor-mode listener can track wake, sleep, arrival and departure using beacons alone, with no PSK.
-**Why it matters:** this is the whole product for anyone who does not want the internet half, it needs no credential, and it cannot possibly disturb CarPlay. It would also work on **any** car with a wireless-CarPlay or hotspot AP, not just BMWs.
-**How to settle it:** `recon/airtime` upstream already does per-frame accounting in monitor mode. Point it at beacons only, log over 20 trips, compare against `carplayd`'s association events as ground truth.
-**Unlocks:** P0, and a version of this that works on cars nobody here owns.
+**Q2. What does the head unit expose on IP?** It answers ARP and ICMP. The port list is unknown — `--head-unit` exists to find out and has not been run against a car yet.
 
-### Q2. What does the head unit actually expose?
-**Unknown:** the mDNS service inventory, TXT records, and open TCP/UDP ports of an NBT EVO on its own CarPlay AP. CarPlay's discovery is Bonjour-based, so a responder is near-certain; its contents are unpublished.
-**Why it matters:** it is the only plausible route to *vehicle-identifying* data over this link — firmware version, model, capabilities. If TXT records carry anything stable, `sensor.*_head_unit` becomes genuinely rich instead of a BSSID.
-**How to settle it:** [`box/probe/headunit_probe.py`](box/probe/headunit_probe.py) is a suite of nine probes the agent fires the moment a car arrives — because **nobody can run it on demand**: the AP only exists while the car is awake, so there is no "park it and scan" option. See [the probe battery](#the-probe-battery) below. It has not caught a car yet. Compare with the only comparable public data point: a Kenwood unit showed TCP 22/7000/8086/8888/5355 and UDP 67/5353/5355 ([ZDI, 2026](https://www.thezdi.com/blog/2026/1/8/breaking-down-the-attack-surface-of-the-kenwood-dnr1007xr-part-two)).
-**Unlocks:** P3, and tier 2 moves to tier 1 or gets deleted honestly.
+**Q3. Why does `probe_wps` fail?** `EINVAL` with an SSID, `ENOBUFS` without, while the driver advertises 2257 bytes of scan-IE room. Cause not found. Possibly contention with the supplicant that owns the radio.
 
-### Q3. Is there anything in the beacon worth reading?
-**Known:** the 802.11u Interworking **Internet bit is clear** and there is **no Apple Device IE** — measured on both cars.
-**Unknown:** whether vendor-specific elements carry anything identifying, and whether that differs by head-unit firmware.
-**How to settle it:** upstream already ships `recon/ieaudit`, a decoder for exactly these elements. Run it across every head unit available.
+**Q4. When does Bonjour actually happen?** Nothing mid-session. The join is the obvious candidate and the probe is not listening early enough to catch it.
 
-### Q4. What signal replaces a counter the driver does not implement?
-**Known, and currently a live defect:** the clean-leave rule watches `tx_failed`, and `ath9k_htc` **does not implement that counter** — it reads 0 forever. Every leave on the current radios comes from a signal rule instead.
-**Why it matters here:** `event.*_departure` is only as good as the box's ability to notice a departure. A late departure event is a wrong trip log and a garage door that closes at the wrong moment.
-**How to settle it:** the MCS rate collapsing to the 1.0 Mb/s floor is visible on both drives that failed and is the obvious candidate; `tx_packets` flatlining while the link is up is the second. Needs a departure capture on a USB radio.
+**Q5. Does any of this generalise?** The Apple Device element is a CarPlay mechanism, not a BMW one, so it should appear on any wireless-CarPlay car. One make tested.
 
-### Q5. How much does watching cost the thing being watched?
-**Known:** CarPlay uses **26.5%** of the channel at the median, the head unit relays every byte twice over the air, and saturating it **dropped CarPlay entirely** and needed a hard reset to re-pair. The box therefore caps its own traffic.
-**Unknown:** the airtime cost of *telemetry* specifically — polling station dumps, mDNS queries, any port scan — as distinct from the route.
-**Why it matters:** an integration that degrades CarPlay to produce a pretty graph is a bad trade, and the failure is loud and physical.
-**How to settle it:** `recon/airtime` from inside the car, with the integration polling at each candidate interval. Publish a cost-per-poll number and pick the interval from it.
-
-### Q6. Does any of this generalise beyond the NBT EVO?
-**Known:** there are two kinds of wireless-CarPlay car. **Wi-Fi pairing** cars run CarPlay over the vehicle's own hotspot, internet included — those need none of this. **Bluetooth pairing** cars like the NBT EVO use a private CarPlay-only network with no internet, which is why this exists ([Audi TSB](https://static.nhtsa.gov/odi/tsbs/2021/MC-10189148-0001.pdf)).
-**Unknown:** which makes fall on which side, and whether the telemetry half works on *both* — it should, since it only needs an AP that exists when the car is awake.
-**How to settle it:** a public compatibility table that anyone can add a row to, starting with the two cars here.
-
-### Q7. What is the right entity model for a thing that is absent most of the time?
-**Unknown, and a genuine Home Assistant design question:** a car is away 95% of the time. Should sensors go `unavailable`, hold their last value, or report zero? Wrong answers produce recorder spam, broken statistics and false automations.
-**Why it matters:** it decides whether long-term statistics are meaningful and whether the database grows without bound.
-**How to settle it:** prototype both in P1 and look at the actual recorder growth and statistics quality over a week. Document the choice and the reason.
-
----
+**Q6. Does the AP still advertise identity once the car is asleep?** The agent now probes again after shutdown, while the head unit is still beaconing. Not yet read.
 
 ## How claims are labelled
 
-Inherited from upstream, and enforced here. Every factual claim in this repository is one of:
-
 | Label | Means |
 |---|---|
-| **measured** | Observed on a real car, phone or box, with a date and a log |
+| **measured** | Observed on a real car, phone or box, with a date |
 | **source** | Read from code, a specification or a vendor document, with a link |
-| **emulator** | Reproduced on Linux stand-ins — which can tell you nothing about iOS behaviour |
 | **inferred** / **hypothesis** | Reasoning. Explicitly not evidence |
 
-Everything in [What you get](#what-you-get-in-home-assistant) marked ✅ is **measured on two BMW F-series cars with factory NBT EVO head units and one iPhone on iOS 27**, in one garage. That is a solid data point, not a universal law. Conclusions that turned out to be wrong are kept and marked wrong rather than quietly edited out.
+Measured on **two BMW F-series cars with factory NBT EVO head units and one iPhone on iOS 27**, in one garage. A solid data point, not a universal law. Conclusions that turned out wrong are kept and marked wrong — the Bonjour hypothesis above is one of them.
 
----
+## Related
 
-## Prior art
-
-Searched before building, because the most likely outcome of any project is that someone has already done it.
-
-| What exists | How it differs |
-|---|---|
-| [HAPT](https://github.com/oxan/hapt) and OpenWrt join/leave scripts | Track *clients of your AP*. The car is not a client of your AP; it **is** an AP. Opposite direction |
-| UniFi / MQTT device trackers | Same inversion, plus they need the car to join home Wi-Fi, which a CarPlay AP never does |
-| Manufacturer cloud integrations (BMW ConnectedDrive and friends) | Rich bus data, but they need signal at the car and a vendor account, and they are exactly what fails in an underground garage |
-| OBD-II dongles | Real vehicle data, complementary to this, and dependent on their own uplink |
-| Community threads on car-hotspot presence | Several people have noticed the idea; the recurring complaint is that it only works while the car is on — which, for wake/sleep detection, **is the signal, not the limitation** |
-
-No public implementation was found of a box on a factory CarPlay network providing a route, nor of anything using that link as a Home Assistant sensor. Not finding something is not proof that nobody has done it.
-
----
-
-## Related projects
-
-- **[internet-over-wireless-carplay](https://github.com/ParkWardRR/internet-over-wireless-carplay)** — the upstream. `carplayd`, the measurements, the test log, and the wiki. Everything marked ✅ here was proven there.
-- Its **[wiki](https://github.com/ParkWardRR/internet-over-wireless-carplay/wiki)** — setup, how it works, what the car's network is, troubleshooting by symptom.
+- **[internet-over-wireless-carplay](https://github.com/ParkWardRR/internet-over-wireless-carplay)** — the upstream: `carplayd`, the measurements, the test log and the wiki.
 
 ## Contributing
 
-The useful contribution is a **dated entry saying what you ran, on what hardware, and what happened** — especially if it contradicts something here. A compatibility row for a car nobody here owns is worth more than a refactor.
+The useful contribution is a **dated entry saying what you ran, on what hardware, and what happened** — especially if it contradicts something here. A beacon decode from a car nobody here owns is worth more than a refactor.
 
-Please never attach a diagnostics dump, log or screenshot containing a real SSID, PSK or MAC to an issue.
+Never attach a report, log or screenshot containing a real SSID, PSK or MAC to an issue.
 
 ## License
 
