@@ -4,7 +4,8 @@
 [![Tests](https://img.shields.io/badge/tests-68%20passing-success)](tests/)
 [![Coverage](https://img.shields.io/badge/integration%20coverage-99%25-success)](tests/)
 [![Verified](https://img.shields.io/badge/verified%20against-HA%202026.2.3-41BDF5)](#status-and-install)
-[![Quality scale](https://img.shields.io/badge/quality%20scale-custom%20%C2%B7%20bronze%20%2B%20silver%20met-lightgrey)](custom_components/carplay_wan/quality_scale.yaml)
+[![Quality scale](https://img.shields.io/badge/self--assessed-bronze%20%2B%20silver%20met-lightgrey)](custom_components/carplay_wan/quality_scale.yaml)
+[![CI](https://github.com/ParkWardRR/ha-carplay-wan/actions/workflows/ci.yml/badge.svg)](https://github.com/ParkWardRR/ha-carplay-wan/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Blue%20Oak%201.0.0-blue)](LICENSE.md)
 [![HACS](https://img.shields.io/badge/HACS-custom%20repository-41BDF5?logo=homeassistantcommunitystore&logoColor=white)](https://hacs.xyz/docs/publish/integration)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.x%2B-41BDF5?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
@@ -219,7 +220,7 @@ This is also why the integration exposes validation as a first-class entity rath
 | `custom_components/carplay_wan` | **45 tests, 99% coverage** against **Home Assistant 2026.2.3**; every entity key verified against a live agent payload |
 | End-to-end in a running HA | ⬜ **not yet done.** Nobody has clicked through the config flow on a real install |
 
-**Quality scale: no tier, and that is the honest answer.** Home Assistant's [integration quality scale](https://contributors.home-assistant.io/core/quality-scale/) grades *core* integrations — hassfest enforces it inside the core repository, and `custom` is the manifest value for everything outside it. Nothing official grades a HACS integration. The rules are still the best checklist there is, so [`quality_scale.yaml`](custom_components/carplay_wan/quality_scale.yaml) fills in all 54 of them as if this were being reviewed: **31 done, 9 exempt, 14 todo**. Every Bronze and Silver rule is met except one — `brands`, which needs an icon submitted to a repository that is not this one. Gold is deliberately still open; `repair-issues` and `docs-troubleshooting` are worth real thought rather than box-ticking.
+**Quality scale: no tier, and that is the honest answer.** Home Assistant's [integration quality scale](https://contributors.home-assistant.io/core/quality-scale/) grades *core* integrations — hassfest enforces it inside the core repository, and `custom` is the manifest value for everything outside it. Nothing official grades a HACS integration. The rules are still the best checklist there is, so [`quality_scale.yaml`](custom_components/carplay_wan/quality_scale.yaml) fills in all 54 of them as if this were being reviewed: **32 done, 9 exempt, 13 todo — every Bronze and Silver rule met.** That is a self-assessment and not a tier, but it is not self-marked either: [CI](.github/workflows/ci.yml) runs `hassfest` and the HACS validator on every push, which is the closest thing to an independent opinion a custom integration can get. Gold is deliberately still open; `repair-issues` and `docs-troubleshooting` deserve real thought rather than box-ticking.
 
 ### 1. The agent, on the box
 

@@ -8,12 +8,12 @@
 # if it were being reviewed, with the same three statuses core uses:
 # done / todo / exempt, and a comment on every exempt.
 #
-# Honest summary, 2026-11-19: Bronze and Silver are complete on this
-# self-assessment except for one rule -- `brands`, which needs an icon and a
-# pull request to the home-assistant/brands repository, and so is not
-# something this repository can close on its own.
+# Honest summary, 2026-11-20: every Bronze and Silver rule is met. That is a
+# self-assessment, not a tier -- nothing official grades a custom integration
+# -- and it is checked on every push by hassfest and the HACS action, which
+# is the closest thing to an independent opinion available.
 #
-#   Bronze    14 done   5 exempt   1 todo   <- brands only
+#   Bronze    15 done   5 exempt   0 todo
 #   Silver     7 done   3 exempt   0 todo
 #   Gold       9 done   0 exempt  12 todo
 #   Platinum   1 done   1 exempt   1 todo
@@ -28,11 +28,12 @@ rules:
     comment: The integration registers no actions.
   appropriate-polling: done
   brands:
-    status: todo
+    status: done
     comment: >-
-      No icon or logo submitted to home-assistant/brands. The repository does
-      accept custom integrations under custom_integrations/, so this is doable
-      rather than blocked.
+      brand/icon.png (256) and brand/icon@2x.png (512), in this repository.
+      HACS checks for in-repo assets first and only falls back to the
+      home-assistant/brands repository, so a custom integration can satisfy
+      this without a pull request to anyone else.
   common-modules: done
   config-flow: done
   config-flow-test-coverage:

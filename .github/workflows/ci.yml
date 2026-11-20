@@ -24,7 +24,11 @@ jobs:
       - run: python -m unittest discover -s box/tests -v
       - name: the agent must not grow a dependency
         run: |
-          ! grep -rnE '^\s*import (paho|aiohttp|requests|yaml)' box/carplay_wan_agent.py \
+          # Column zero on purpose. paho is imported inside MqttPublisher so
+          # that MQTT stays optional, and an indent-tolerant pattern flagged
+          # exactly the deliberate lazy import this rule exists to permit.
+          ! grep -nE '^import (paho|aiohttp|requests|yaml)|^from (paho|aiohttp|requests|yaml)' \
+            box/carplay_wan_agent.py \
             || { echo "a top-level third-party import crept in"; exit 1; }
 
   integration:
