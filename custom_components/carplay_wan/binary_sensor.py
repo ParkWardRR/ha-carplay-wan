@@ -18,6 +18,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .coordinator import CarPlayWanConfigEntry, CarPlayWanCoordinator
 from .entity import CarPlayWanEntity
 
+# Everything here is read-only and served from one coordinator, so there is
+# no device to overwhelm and no reason to serialise updates.
+PARALLEL_UPDATES = 0
+
 
 @dataclass(frozen=True, kw_only=True)
 class CarPlayWanBinaryDescription(BinarySensorEntityDescription):

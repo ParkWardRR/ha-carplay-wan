@@ -35,3 +35,8 @@ build/
 .idea/
 .vscode/
 .nimbalyst/
+
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/

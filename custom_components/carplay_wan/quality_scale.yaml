@@ -8,18 +8,18 @@
 # if it were being reviewed, with the same three statuses core uses:
 # done / todo / exempt, and a comment on every exempt.
 #
-# Honest summary, 2026-11-19: NOT Bronze. The tiers are cumulative, so the
-# three open Bronze rules below hold the whole thing at no tier -- even though
-# nine Gold rules are already met, because the integration was built with
-# devices, diagnostics, entity categories and translations from the start.
+# Honest summary, 2026-11-19: Bronze and Silver are complete on this
+# self-assessment except for one rule -- `brands`, which needs an icon and a
+# pull request to the home-assistant/brands repository, and so is not
+# something this repository can close on its own.
 #
-#   Bronze    12 done   5 exempt   3 todo   <- blocks everything above
-#   Silver     5 done   3 exempt   2 todo
+#   Bronze    14 done   5 exempt   1 todo   <- brands only
+#   Silver     7 done   3 exempt   0 todo
 #   Gold       9 done   0 exempt  12 todo
 #   Platinum   1 done   1 exempt   1 todo
 #
-# The two that actually matter are config-flow-test-coverage and test-coverage:
-# the agent has 23 tests, the integration has none.
+# Gold is a long way off and that is the right order: repair-issues and
+# docs-troubleshooting are worth real thought, not box-ticking.
 
 rules:
   # --- Bronze ---------------------------------------------------------------
@@ -36,11 +36,11 @@ rules:
   common-modules: done
   config-flow: done
   config-flow-test-coverage:
-    status: todo
+    status: done
     comment: >-
-      The config flow has no tests at all. It is the most load-bearing gap in
-      this file: _probe() distinguishes cannot_connect, timeout and
-      not_the_agent, and none of those three branches is covered.
+      100% of config_flow.py. Every branch of _probe() -- cannot_connect,
+      timeout, not_the_agent, HTTP error -- plus recovery after a failure and
+      the duplicate-entry abort.
   dependency-transparency:
     status: done
     comment: requirements is empty; the integration uses only Home Assistant's own aiohttp.
@@ -53,11 +53,11 @@ rules:
   docs-high-level-description: done
   docs-installation-instructions: done
   docs-removal-instructions:
-    status: todo
+    status: done
     comment: >-
-      The README explains installing the agent and the integration, not
-      removing them. Removal has a real step people will miss -- the systemd
-      unit and /etc/carplay-wan-agent.env on the box outlive the config entry.
+      README has an Uninstalling section, including the part people miss: the
+      systemd unit and /etc/carplay-wan-agent.env on the box outlive the
+      config entry, and the salt file has to go too.
   docs-triggers:
     status: exempt
     comment: No triggers.
@@ -101,18 +101,18 @@ rules:
     status: done
     comment: Handled by DataUpdateCoordinator, which logs once down and once up.
   parallel-updates:
-    status: todo
-    comment: >-
-      No platform sets PARALLEL_UPDATES. All three are read-only off one
-      coordinator, so the correct value is 0, but it still has to be written.
+    status: done
+    comment: PARALLEL_UPDATES = 0 in all three platforms; read-only off one coordinator.
   reauthentication-flow:
     status: exempt
     comment: The agent has no authentication to re-enter.
   test-coverage:
-    status: todo
+    status: done
     comment: >-
-      0% on the integration. The 23 tests in box/tests cover the agent's state
-      machine, not this.
+      45 tests, 99% overall and no module below 97%. They earned their keep
+      immediately: the device tracker subclassed TrackerEntity but implemented
+      is_connected, which that base ignores, so every tracker reported
+      `unknown` and nothing warned.
 
   # --- Gold -----------------------------------------------------------------
   devices:
