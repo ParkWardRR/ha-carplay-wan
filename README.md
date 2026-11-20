@@ -1,7 +1,7 @@
 # CarPlay WAN for Home Assistant
 
 [![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20agent%20%2B%20integration-yellow)](#status-and-install)
-[![Tests](https://img.shields.io/badge/tests-68%20passing-success)](tests/)
+[![Tests](https://img.shields.io/badge/tests-87%20passing-success)](tests/)
 [![Coverage](https://img.shields.io/badge/integration%20coverage-99%25-success)](tests/)
 [![Verified](https://img.shields.io/badge/verified%20against-HA%202026.2.3-41BDF5)](#status-and-install)
 [![Quality scale](https://img.shields.io/badge/self--assessed-bronze%20%2B%20silver%20met-lightgrey)](custom_components/carplay_wan/quality_scale.yaml)
@@ -216,7 +216,7 @@ This is also why the integration exposes validation as a first-class entity rath
 | Piece | State |
 |---|---|
 | `box/carplay_wan_agent.py` | Runs. 23 unit tests on fixtures copied from real logs; verified against the live box |
-| `box/probe/headunit-probe.sh` | Written, fires on arrival. **Has not yet caught a car** — see [Q2](#q2-what-does-the-head-unit-actually-expose) |
+| `box/probe/headunit_probe.py` | Nine probes, fired on arrival. Parsers tested against a real beacon; pipeline verified on the box. **Has not yet caught a car** — see [the probe battery](#the-probe-battery) |
 | `custom_components/carplay_wan` | **45 tests, 99% coverage** against **Home Assistant 2026.2.3**; every entity key verified against a live agent payload |
 | End-to-end in a running HA | ⬜ **not yet done.** Nobody has clicked through the config flow on a real install |
 
@@ -288,8 +288,9 @@ box/                            runs on the Linux box, not in Home Assistant
   carplay_wan_agent.py          the state machine. stdlib only, Python 3.11+
   carplay-wan-agent.service     systemd unit, hardened
   agent.example.env             configuration; a secret, because of the SSID
-  probe/headunit-probe.sh       Q2: read-only discovery, fired on arrival
+  probe/headunit_probe.py       Q2: nine read-only probes, fired on arrival
   tests/test_agent.py           23 tests on fixtures copied from real logs
+  tests/test_probe.py           19 tests, incl. a real beacon off the air
 custom_components/carplay_wan/  the HACS integration
   coordinator.py                polls the agent. never talks to the car
   device_tracker.py             is the car home
@@ -300,6 +301,65 @@ hacs.json  manifest.json        HACS and Home Assistant metadata
 ```
 
 The split is the design. Anything that touches the car link lives on the box, where airtime can be reasoned about; Home Assistant polls a JSON endpoint on the LAN and never goes near the car's channel.
+
+## The probe battery
+
+Nine probes, run in this order the moment a car wakes up, cheapest and most
+valuable first. The ordering is not cosmetic: a session can be eleven seconds
+long, and whatever has not run by the time the car is switched off did not run.
+
+| # | Probe | Sends | What it could tell us |
+|---|---|---|---|
+| 1 | `link` | nothing | BSSID, SSID, frequency, signal, negotiated rates |
+| 2 | `beacon_ies` | nothing | **The full raw information elements**, read out of the supplicant's own cache. Country, channel, HT/VHT/HE, RSN, every vendor element, 802.11u, and whatever WPS the beacon carries |
+| 3 | `probe_wps` | 2 frames | **The best shot at naming the car.** A directed probe request carrying a WPS element — what any WPS-capable phone emits while scanning. The answer can contain manufacturer, model name, model number, serial number and device name |
+| 4 | `station` | nothing | Per-station counters, MCS rates, beacon loss |
+| 5 | `neighbours` | nothing | Who else is on the link, from the neighbour caches |
+| 6 | `reachability` | 3 pings | Round trip to the head unit — **and the gate for everything after it** |
+| 7 | `dhcp` | 1 frame | One DISCOVER, read the OFFER, never REQUEST. Vendor class (60), vendor specific (43), hostname (12), domain (15) |
+| 8 | `mdns` | a browse | CarPlay discovery is Bonjour, so there is a responder here. AirPlay TXT records commonly carry `model`, `manufacturer`, `srcvers`, `deviceid` |
+| 9 | `tcp_ports` → `http_info` | 1 connect per port | A short port list, then `GET /info` on anything that answered — the AirPlay endpoint that returns a device description |
+
+**Why `probe_wps` has to ask rather than listen.** A beacon's WPS element is
+nearly empty. In one snapshot of this channel, **1 of 13** access points
+advertised WPS at all, and that one carried four attributes — version, state,
+RF bands, a vendor extension — naming nothing (measured). The attributes that
+identify a device are only required in a **probe response to a request that
+itself advertises WPS** (source: the WPS specification). So the probe asks.
+
+**And it asks from the other radio.** With one radio per car, the idle one is
+already hunting this channel. Sending the probe from there costs airtime that
+was being spent anyway and never disturbs the association that is carrying
+CarPlay. If there is no idle sibling, the probe refuses to run rather than
+scan on the radio serving the car.
+
+### What stops it
+
+Every active probe is gated, because the failure mode here is not a bad
+reading — it is dropping someone's CarPlay session. Upstream measured that
+saturating this head unit's relay **drops CarPlay entirely and needs a hard
+reset to re-pair**, and CarPlay already uses about a quarter of the channel.
+
+- **A pacer.** No more than 8 packets per second across the whole suite.
+- **A budget.** 75 seconds total. A probe that cannot finish does not start,
+  and says so — a half-finished probe looks like an answer.
+- **A latency gate.** `reachability` runs sixth, before anything expensive.
+  If the round trip is already over 400 ms, or the head unit does not answer,
+  every remaining active probe is skipped and the report says why.
+- **Read-only, always.** It asks. It never writes, pairs, or authenticates.
+
+### Running it by hand
+
+```sh
+headunit_probe.py A --dry-run     # exactly what would run, sends nothing
+headunit_probe.py A --self-test   # decode beacons already heard; needs no car
+headunit_probe.py A               # the real thing, when a car is awake
+```
+
+`--self-test` exists because the real target is available for seconds at a
+time, and a parser that has never met a real beacon is a parser that will fail
+on the one that matters. On the garage box it decodes eleven neighbouring
+access points and sends nothing.
 
 ## Privacy and secrets — read this before you publish anything
 
@@ -353,7 +413,7 @@ Research that has not been done, written so somebody can actually do it. Each on
 ### Q2. What does the head unit actually expose?
 **Unknown:** the mDNS service inventory, TXT records, and open TCP/UDP ports of an NBT EVO on its own CarPlay AP. CarPlay's discovery is Bonjour-based, so a responder is near-certain; its contents are unpublished.
 **Why it matters:** it is the only plausible route to *vehicle-identifying* data over this link — firmware version, model, capabilities. If TXT records carry anything stable, `sensor.*_head_unit` becomes genuinely rich instead of a BSSID.
-**How to settle it:** `box/probe/headunit-probe.sh` now does exactly this, and the agent fires it the moment a car arrives — because **nobody can run it on demand**: the AP only exists while the car is awake, so there is no "park it and scan" option. It browses mDNS on the car interface, tries one connect against a short port list, dumps the beacon for upstream's `ieaudit`, and writes JSON under `/var/lib/carplay-wan/probe/`. It has not caught a car yet. Decode and publish. Compare with the only comparable public data point: a Kenwood unit showed TCP 22/7000/8086/8888/5355 and UDP 67/5353/5355 ([ZDI, 2026](https://www.thezdi.com/blog/2026/1/8/breaking-down-the-attack-surface-of-the-kenwood-dnr1007xr-part-two)).
+**How to settle it:** [`box/probe/headunit_probe.py`](box/probe/headunit_probe.py) is a suite of nine probes the agent fires the moment a car arrives — because **nobody can run it on demand**: the AP only exists while the car is awake, so there is no "park it and scan" option. See [the probe battery](#the-probe-battery) below. It has not caught a car yet. Compare with the only comparable public data point: a Kenwood unit showed TCP 22/7000/8086/8888/5355 and UDP 67/5353/5355 ([ZDI, 2026](https://www.thezdi.com/blog/2026/1/8/breaking-down-the-attack-surface-of-the-kenwood-dnr1007xr-part-two)).
 **Unlocks:** P3, and tier 2 moves to tier 1 or gets deleted honestly.
 
 ### Q3. Is there anything in the beacon worth reading?

@@ -22,6 +22,8 @@ jobs:
           # the floor the tests run against, not whatever is newest.
           python-version: "3.11"
       - run: python -m unittest discover -s box/tests -v
+      - name: the probe must parse a real beacon and stay offline
+        run: python box/probe/headunit_probe.py A --dry-run > /dev/null
       - name: the agent must not grow a dependency
         run: |
           # Column zero on purpose. paho is imported inside MqttPublisher so
@@ -57,11 +59,3 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
-
-  shell:
-    name: shellcheck
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - run: shellcheck box/probe/headunit-probe.sh
