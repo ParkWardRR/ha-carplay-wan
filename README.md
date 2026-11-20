@@ -1,6 +1,8 @@
 # CarPlay WAN for Home Assistant
 
-[![Status](https://img.shields.io/badge/status-design%20%E2%80%94%20no%20code%20yet-orange)](#roadmap)
+[![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20agent%20%2B%20integration-yellow)](#status-and-install)
+[![Tests](https://img.shields.io/badge/agent%20tests-23%20passing-success)](box/tests/test_agent.py)
+[![Verified](https://img.shields.io/badge/verified%20against-HA%202026.2.3-41BDF5)](#status-and-install)
 [![License](https://img.shields.io/badge/license-Blue%20Oak%201.0.0-blue)](LICENSE.md)
 [![HACS](https://img.shields.io/badge/HACS-custom%20repository-41BDF5?logo=homeassistantcommunitystore&logoColor=white)](https://hacs.xyz/docs/publish/integration)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.x%2B-41BDF5?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
@@ -206,22 +208,79 @@ This is also why the integration exposes validation as a first-class entity rath
 
 ## Status and install
 
-**There is no code in this repository yet.** This is the design, the evidence behind it, and the plan. The upstream daemon it builds on is production-running on two cars; the Home Assistant surface is what is being built here.
+**Alpha.** The agent and the integration both exist and both have been run against real hardware. What has *not* happened is a week of real driving, which is the gate in the roadmap. Treat it as something to try, not something to depend on.
 
-When it ships, installation will be the normal two pieces:
+| Piece | State |
+|---|---|
+| `box/carplay_wan_agent.py` | Runs. 23 unit tests on fixtures copied from real logs; verified against the live box |
+| `box/probe/headunit-probe.sh` | Written, fires on arrival. **Has not yet caught a car** — see [Q2](#q2-what-does-the-head-unit-actually-expose) |
+| `custom_components/carplay_wan` | All nine modules import against **Home Assistant 2026.2.3**; every entity key verified against a live agent payload |
+| End-to-end in a running HA | ⬜ **not yet done.** Nobody has clicked through the config flow on a real install |
 
-```yaml
-# 1. Add-on: runs carplayd, owns the USB radio(s), provides the route.
-#    Installed from the add-on store (this repo as a custom add-on repository).
+### 1. The agent, on the box
 
-# 2. Integration: custom_components/carplay_wan, installed via HACS as a
-#    custom repository, then configured through the UI config flow.
-#    No YAML required; the config flow discovers the add-on over MQTT.
+It reads what carplayd already knows and serves one JSON endpoint. Standard library only — the box has Python 3.11 and nothing installed, and it stays that way.
+
+```sh
+sudo install -m 755 box/carplay_wan_agent.py       /usr/local/bin/
+sudo install -m 755 box/probe/headunit-probe.sh    /usr/local/libexec/
+sudo install -m 600 box/agent.example.env          /etc/carplay-wan-agent.env   # edit this
+sudo install -m 644 box/carplay-wan-agent.service  /etc/systemd/system/
+sudo systemctl enable --now carplay-wan-agent
 ```
 
-Per [HACS's publishing requirements](https://hacs.xyz/docs/publish/integration), that means `hacs.json` at the repository root, `custom_components/carplay_wan/manifest.json` with `domain`, `name`, `documentation`, `issue_tracker` and `codeowners`, a public repository with topics and a description, and at least one release. All of that is roadmap item **P2** below.
+Check it before going near Home Assistant. `--once` prints a snapshot and exits:
+
+```sh
+sudo carplay_wan_agent.py --car A=F32 --car B=F22 --once
+```
+
+**Watch mode needs no password and never associates** — beacons only, so it cannot disturb CarPlay. This is the whole product if you only want to know whether the car is home, and it should work on any car whose AP appears when it wakes:
+
+```sh
+sudo carplay_wan_agent.py --car A=F32="BMW00000 CarPlay" --watch-dev cara
+```
+
+### 2. The integration, in Home Assistant
+
+HACS → ⋮ → Custom repositories → `https://github.com/ParkWardRR/ha-carplay-wan`, type Integration. Then **Settings → Devices & Services → Add Integration → CarPlay WAN**, and give it the box's address and port 8099. No YAML. One device per car.
+
+Prefer not to install a custom integration? Start the agent with `--mqtt-host` and it publishes MQTT discovery instead; stock HA builds the same entities with no custom code. The HTTP endpoint and MQTT are two transports over one state machine, not two implementations.
+
+### What it looks like on the wire
+
+```json
+{ "agent": { "version": "0.1.0", "metrics_ok": true, "redacted": true },
+  "upstream": true,
+  "cars": { "A": { "name": "F32", "present": true, "serving": true,
+                   "validated": true, "signal_dbm": -58, "phones": 1,
+                   "forwarded_bytes": 1255890, "head_unit": "bssid-9f21c0ab4e",
+                   "state": "home" } } }
+```
+
+`head_unit` is hashed with a per-install salt. That is the default, and `--reveal` is the only way to change it.
 
 ---
+
+## What is in here
+
+```
+box/                            runs on the Linux box, not in Home Assistant
+  carplay_wan_agent.py          the state machine. stdlib only, Python 3.11+
+  carplay-wan-agent.service     systemd unit, hardened
+  agent.example.env             configuration; a secret, because of the SSID
+  probe/headunit-probe.sh       Q2: read-only discovery, fired on arrival
+  tests/test_agent.py           23 tests on fixtures copied from real logs
+custom_components/carplay_wan/  the HACS integration
+  coordinator.py                polls the agent. never talks to the car
+  device_tracker.py             is the car home
+  binary_sensor.py              awake · route up · internet validated
+  sensor.py                     signal · phones · bytes · rate · head unit
+  diagnostics.py                redacted twice, on purpose
+hacs.json  manifest.json        HACS and Home Assistant metadata
+```
+
+The split is the design. Anything that touches the car link lives on the box, where airtime can be reasoned about; Home Assistant polls a JSON endpoint on the LAN and never goes near the car's channel.
 
 ## Privacy and secrets — read this before you publish anything
 
@@ -252,9 +311,9 @@ flowchart LR
 
 | # | Phase | Delivers | Accepted when |
 |---|---|---|---|
-| **P0** | **Watch-only presence** | A `device_tracker` and an `awake` binary sensor driven purely by beacon observation. No association, no password, no route, cannot affect CarPlay | A car's arrival and departure are reflected in HA within 5 s, across 20 consecutive trips, with zero false "away" while parked |
-| **P1** | **Read the box** | The full tier-1 entity set from `carplayd`'s metrics and event stream, over MQTT discovery | Every entity in [the table](#what-you-get-in-home-assistant) populates on a real car, and survives a box restart and an HA restart without orphaned entities |
-| **P2** | **Ship it** | HACS custom repository, add-on repository, UI config flow, redacted diagnostics, tests, first release | A clean HA install can add it from HACS and reach a working state with no YAML and no shell access |
+| **P0** | **Watch-only presence** | ◐ **built** (`--watch-dev`): scans one channel for the car's beacon, no association, no password, no route | ⬜ A car's arrival and departure reflected in HA within 5 s, across 20 consecutive trips, with zero false "away" while parked. **Not yet run against a car** |
+| **P1** | **Read the box** | ◐ **built**: tier-1 entities from carplayd's metrics and event log, over HTTP *and* MQTT discovery | ⬜ Every entity in [the table](#what-you-get-in-home-assistant) populates on a real car, and survives a box restart and an HA restart without orphaned entities |
+| **P2** | **Ship it** | ◐ `hacs.json`, manifest, config flow, redacted diagnostics and tests exist. Missing: the add-on wrapper and a release | ⬜ A clean HA install can add it from HACS and reach a working state with no YAML and no shell access |
 | **GATE** | **A week of real driving** | Nothing. This is the gate | Seven days, two cars, no false presence, no stuck sensors, no entity spam in the recorder, and a diagnostics dump that is provably clean of PSK, SSID digits and raw MACs |
 | **P3** | **Discovery** | Answers to [Q1–Q3](#open-questions): mDNS inventory, port fingerprint, beacon elements. `sensor.*_services` moves from research to measured | Three or more head units surveyed, with a published, reproducible method and a decoder in the repository |
 | **P4** | **Inference** | Parking-spot classification from RSSI fingerprints, driver identification, a trip log, and anomaly alerting ("awake 20 min, never left") | Each inference carries a stated accuracy measured against ground truth the owner recorded, not a vibe |
@@ -275,7 +334,7 @@ Research that has not been done, written so somebody can actually do it. Each on
 ### Q2. What does the head unit actually expose?
 **Unknown:** the mDNS service inventory, TXT records, and open TCP/UDP ports of an NBT EVO on its own CarPlay AP. CarPlay's discovery is Bonjour-based, so a responder is near-certain; its contents are unpublished.
 **Why it matters:** it is the only plausible route to *vehicle-identifying* data over this link — firmware version, model, capabilities. If TXT records carry anything stable, `sensor.*_head_unit` becomes genuinely rich instead of a BSSID.
-**How to settle it:** one `avahi-browse -art` and one rate-limited `nmap -sS -sU` against a head unit you own, from the box, while parked. Decode and publish. Compare with the only comparable public data point: a Kenwood unit showed TCP 22/7000/8086/8888/5355 and UDP 67/5353/5355 ([ZDI, 2026](https://www.thezdi.com/blog/2026/1/8/breaking-down-the-attack-surface-of-the-kenwood-dnr1007xr-part-two)).
+**How to settle it:** `box/probe/headunit-probe.sh` now does exactly this, and the agent fires it the moment a car arrives — because **nobody can run it on demand**: the AP only exists while the car is awake, so there is no "park it and scan" option. It browses mDNS on the car interface, tries one connect against a short port list, dumps the beacon for upstream's `ieaudit`, and writes JSON under `/var/lib/carplay-wan/probe/`. It has not caught a car yet. Decode and publish. Compare with the only comparable public data point: a Kenwood unit showed TCP 22/7000/8086/8888/5355 and UDP 67/5353/5355 ([ZDI, 2026](https://www.thezdi.com/blog/2026/1/8/breaking-down-the-attack-surface-of-the-kenwood-dnr1007xr-part-two)).
 **Unlocks:** P3, and tier 2 moves to tier 1 or gets deleted honestly.
 
 ### Q3. Is there anything in the beacon worth reading?

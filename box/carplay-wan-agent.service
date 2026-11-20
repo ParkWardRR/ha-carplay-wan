@@ -1,0 +1,31 @@
+[Unit]
+Description=carplay-wan-agent: a car's CarPlay Wi-Fi link, as Home Assistant state
+Documentation=https://github.com/ParkWardRR/ha-carplay-wan
+# Not Requires=: the agent is useful on its own in watch mode, and a carplayd
+# restart must not take the presence sensor down with it.
+After=network-online.target carplayd.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/carplay-wan-agent.env
+ExecStart=/usr/local/bin/carplay_wan_agent.py $AGENT_ARGS
+Restart=always
+RestartSec=5
+
+# It reads carplayd's log and runs the probe; it has no business doing more.
+# The probe needs raw sockets for nothing -- it is connect() and avahi -- so
+# this can stay tight.
+DynamicUser=no
+User=root
+StateDirectory=carplay-wan
+ProtectSystem=strict
+ReadWritePaths=/var/lib/carplay-wan
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target
