@@ -1,0 +1,37 @@
+# Secrets. The car's PSK, its SSID (the digits are VIN digits), MACs and any
+# capture that contains them. This repository's upstream published secrets
+# twice; neither time was the leak in an obvious file.
+secrets/
+*.env
+!*.example.env
+
+# Captures
+captures/
+*.pcap
+*.pcapng
+
+# Home Assistant diagnostics downloads — the most common way a credential
+# escapes, because people paste them into issues.
+diagnostics/
+*-diagnostics.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Go
+/out/
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+.nimbalyst/
