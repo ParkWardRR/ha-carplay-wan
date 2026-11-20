@@ -1,0 +1,203 @@
+# Home Assistant integration quality scale — self-assessment.
+#
+# The scale is a core-integration mechanism: hassfest enforces it inside the
+# core repository and the core team approves the tier. A custom integration
+# installed through HACS is outside it by definition -- `custom` is the
+# manifest value for "not part of core", and nothing official grades it. The
+# rules are still the best available checklist, so this file is filled in as
+# if it were being reviewed, with the same three statuses core uses:
+# done / todo / exempt, and a comment on every exempt.
+#
+# Honest summary, 2026-11-19: NOT Bronze. The tiers are cumulative, so the
+# three open Bronze rules below hold the whole thing at no tier -- even though
+# nine Gold rules are already met, because the integration was built with
+# devices, diagnostics, entity categories and translations from the start.
+#
+#   Bronze    12 done   5 exempt   3 todo   <- blocks everything above
+#   Silver     5 done   3 exempt   2 todo
+#   Gold       9 done   0 exempt  12 todo
+#   Platinum   1 done   1 exempt   1 todo
+#
+# The two that actually matter are config-flow-test-coverage and test-coverage:
+# the agent has 23 tests, the integration has none.
+
+rules:
+  # --- Bronze ---------------------------------------------------------------
+  action-setup:
+    status: exempt
+    comment: The integration registers no actions.
+  appropriate-polling: done
+  brands:
+    status: todo
+    comment: >-
+      No icon or logo submitted to home-assistant/brands. The repository does
+      accept custom integrations under custom_integrations/, so this is doable
+      rather than blocked.
+  common-modules: done
+  config-flow: done
+  config-flow-test-coverage:
+    status: todo
+    comment: >-
+      The config flow has no tests at all. It is the most load-bearing gap in
+      this file: _probe() distinguishes cannot_connect, timeout and
+      not_the_agent, and none of those three branches is covered.
+  dependency-transparency:
+    status: done
+    comment: requirements is empty; the integration uses only Home Assistant's own aiohttp.
+  docs-actions:
+    status: exempt
+    comment: No actions.
+  docs-conditions:
+    status: exempt
+    comment: No conditions.
+  docs-high-level-description: done
+  docs-installation-instructions: done
+  docs-removal-instructions:
+    status: todo
+    comment: >-
+      The README explains installing the agent and the integration, not
+      removing them. Removal has a real step people will miss -- the systemd
+      unit and /etc/carplay-wan-agent.env on the box outlive the config entry.
+  docs-triggers:
+    status: exempt
+    comment: No triggers.
+  entity-event-setup:
+    status: exempt
+    comment: >-
+      Nothing to subscribe to. Every entity is coordinator-driven over HTTP
+      polling; there is no push channel from the agent.
+  entity-unique-id: done
+  has-entity-name: done
+  runtime-data:
+    status: done
+    comment: entry.runtime_data, with the entry typed as CarPlayWanConfigEntry.
+  test-before-configure:
+    status: done
+    comment: The config flow fetches /state and rejects a reply with no cars in it.
+  test-before-setup:
+    status: done
+    comment: async_config_entry_first_refresh raises UpdateFailed if the agent is unreachable.
+  unique-config-entry:
+    status: done
+    comment: unique_id is host:port, with _abort_if_unique_id_configured.
+
+  # --- Silver ---------------------------------------------------------------
+  action-exceptions:
+    status: exempt
+    comment: No actions.
+  config-entry-unloading: done
+  docs-configuration-parameters:
+    status: exempt
+    comment: There is no options flow; host and port are the only settings.
+  docs-installation-parameters: done
+  entity-unavailable:
+    status: done
+    comment: >-
+      Unavailable means the agent cannot be reached. A car being away is
+      present=false, which is a value and not an outage -- conflating the two
+      would fire every automation on every trip.
+  integration-owner: done
+  log-when-unavailable:
+    status: done
+    comment: Handled by DataUpdateCoordinator, which logs once down and once up.
+  parallel-updates:
+    status: todo
+    comment: >-
+      No platform sets PARALLEL_UPDATES. All three are read-only off one
+      coordinator, so the correct value is 0, but it still has to be written.
+  reauthentication-flow:
+    status: exempt
+    comment: The agent has no authentication to re-enter.
+  test-coverage:
+    status: todo
+    comment: >-
+      0% on the integration. The 23 tests in box/tests cover the agent's state
+      machine, not this.
+
+  # --- Gold -----------------------------------------------------------------
+  devices:
+    status: done
+    comment: One device per car, named from the agent.
+  diagnostics:
+    status: done
+    comment: >-
+      Redacted twice -- the agent hashes identifiers unless started with
+      --reveal, and the integration redacts again rather than trusting that.
+  discovery:
+    status: todo
+    comment: >-
+      The agent could advertise itself over zeroconf and be found instead of
+      typed in. Worth doing; nothing blocks it.
+  discovery-update-info:
+    status: todo
+    comment: Depends on discovery.
+  docs-data-update:
+    status: todo
+    comment: >-
+      The 10 s interval and why it is 10 s is in the code, not in the docs
+      where a user would look.
+  docs-examples:
+    status: todo
+    comment: >-
+      The README lists automations this makes possible in prose, but ships no
+      YAML or blueprint anyone can paste.
+  docs-known-limitations: done
+  docs-supported-devices:
+    status: done
+    comment: >-
+      Measured on two BMW NBT EVO head units; the README says so and Q6 asks
+      openly what else it works on.
+  docs-supported-functions: done
+  docs-troubleshooting:
+    status: todo
+    comment: >-
+      Missing, and this integration has an unusually good one available: "car
+      home, route up, internet_validated off" has a specific fix, which is to
+      tap Use For Internet on the phone.
+  docs-use-cases: done
+  dynamic-devices:
+    status: todo
+    comment: >-
+      Cars are enumerated once at setup. Adding a third car to the agent needs
+      a reload of the config entry.
+  entity-category: done
+  entity-device-class: done
+  entity-disabled-by-default:
+    status: todo
+    comment: >-
+      Nothing is disabled by default. Link rate and signal are the obvious
+      candidates: they change every poll and most people will never look.
+  entity-translations: done
+  exception-translations:
+    status: todo
+    comment: UpdateFailed messages are English strings built in coordinator.py.
+  icon-translations:
+    status: todo
+    comment: Icons are set with icon= on the descriptions instead of an icons.json.
+  reconfiguration-flow:
+    status: todo
+    comment: Moving the agent to another host means deleting the entry and adding it again.
+  repair-issues:
+    status: todo
+    comment: >-
+      The best candidate in the whole integration: a repair issue for "the
+      phone has not validated this link" would turn the project's single
+      biggest gotcha into something Home Assistant tells you about.
+  stale-devices:
+    status: todo
+    comment: A car removed from the agent's config leaves its device behind.
+
+  # --- Platinum -------------------------------------------------------------
+  async-dependency:
+    status: exempt
+    comment: >-
+      There is no dependency. The integration talks to the agent with Home
+      Assistant's own aiohttp session, fully async.
+  inject-websession:
+    status: done
+    comment: async_get_clientsession in both the coordinator and the config flow.
+  strict-typing:
+    status: todo
+    comment: >-
+      Annotated throughout and it imports clean, but there is no py.typed and
+      mypy --strict has never been run over it.

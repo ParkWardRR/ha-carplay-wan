@@ -1,10 +1,13 @@
 {
   "domain": "carplay_wan",
   "name": "CarPlay WAN",
+  "quality_scale": "custom",
   "version": "0.1.0",
   "documentation": "https://github.com/ParkWardRR/ha-carplay-wan",
   "issue_tracker": "https://github.com/ParkWardRR/ha-carplay-wan/issues",
-  "codeowners": ["@ParkWardRR"],
+  "codeowners": [
+    "@ParkWardRR"
+  ],
   "config_flow": true,
   "dependencies": [],
   "requirements": [],

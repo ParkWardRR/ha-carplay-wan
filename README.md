@@ -3,6 +3,7 @@
 [![Status](https://img.shields.io/badge/status-alpha%20%E2%80%94%20agent%20%2B%20integration-yellow)](#status-and-install)
 [![Tests](https://img.shields.io/badge/agent%20tests-23%20passing-success)](box/tests/test_agent.py)
 [![Verified](https://img.shields.io/badge/verified%20against-HA%202026.2.3-41BDF5)](#status-and-install)
+[![Quality scale](https://img.shields.io/badge/quality%20scale-custom%20%C2%B7%2027%20done%20%C2%B7%2018%20todo-lightgrey)](custom_components/carplay_wan/quality_scale.yaml)
 [![License](https://img.shields.io/badge/license-Blue%20Oak%201.0.0-blue)](LICENSE.md)
 [![HACS](https://img.shields.io/badge/HACS-custom%20repository-41BDF5?logo=homeassistantcommunitystore&logoColor=white)](https://hacs.xyz/docs/publish/integration)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2025.x%2B-41BDF5?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
@@ -216,6 +217,8 @@ This is also why the integration exposes validation as a first-class entity rath
 | `box/probe/headunit-probe.sh` | Written, fires on arrival. **Has not yet caught a car** — see [Q2](#q2-what-does-the-head-unit-actually-expose) |
 | `custom_components/carplay_wan` | All nine modules import against **Home Assistant 2026.2.3**; every entity key verified against a live agent payload |
 | End-to-end in a running HA | ⬜ **not yet done.** Nobody has clicked through the config flow on a real install |
+
+**Quality scale: no tier, and that is the honest answer.** Home Assistant's [integration quality scale](https://contributors.home-assistant.io/core/quality-scale/) grades *core* integrations — hassfest enforces it inside the core repository, and `custom` is the manifest value for everything outside it. Nothing official grades a HACS integration. The rules are still the best checklist there is, so [`quality_scale.yaml`](custom_components/carplay_wan/quality_scale.yaml) fills in all 54 of them as if this were being reviewed: **27 done, 9 exempt, 18 todo**. The tiers are cumulative, so three open Bronze rules hold it at no tier even though nine Gold rules are already met. The two worth caring about are `config-flow-test-coverage` and `test-coverage`: the agent has 23 tests, the integration has none.
 
 ### 1. The agent, on the box
 
