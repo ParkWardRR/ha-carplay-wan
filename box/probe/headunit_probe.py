@@ -71,12 +71,17 @@ WPS_STATE = {1: "not configured", 2: "configured"}
 
 # A WPS IE for our own probe request, marking us an enrollee asking for device
 # info. This is the same thing any WPS-capable phone emits while scanning.
+# The length byte must equal the payload that follows it. The first draft
+# declared 0x1d over a 20-byte payload and `iw` rejected the whole scan with
+# EINVAL -- which is the correct behaviour, and cost a live session to learn.
 WPS_PROBE_IE = (
-    "dd1d0050f204"  # vendor IE, WPS OUI + type
+    "dd14"  # vendor IE, 20 bytes follow
+    "0050f204"  # WPS OUI + type
     "104a000110"  # Version 1.0
     "103a000100"  # Request Type: enrollee, info only
     "10080002318c"  # Config Methods
 )
+assert len(WPS_PROBE_IE) // 2 - 2 == int(WPS_PROBE_IE[2:4], 16), "WPS IE length byte"
 
 OUI_NAMES = {
     "0050f2": "Microsoft/WPS-WMM",
@@ -246,6 +251,13 @@ class Ctx:
     gw4: str
     budget: Budget
     dry_run: bool = False
+    # Set when there is no association to learn the BSSID from -- the
+    # post-shutdown window, where the AP is still beaconing into the
+    # supplicant's scan cache but nothing is connected to it.
+    bssid_hint: str | None = None
+    # Set only in --head-unit mode: the temporary source address that makes
+    # the head unit reachable. None means the IPv4 probes stay skipped.
+    v4_source: str | None = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -293,9 +305,9 @@ def p_beacon_ies(c: Ctx) -> dict[str, Any]:
     supplicant hands over the whole blob, so every vendor element can be
     decoded here instead of trusted to someone else's pretty-printer.
     """
-    bssid = p_link(c).get("bssid")
+    bssid = p_link(c).get("bssid") or c.bssid_hint
     if not bssid:
-        return {"skipped": "not associated"}
+        return {"skipped": "not associated and no BSSID known"}
     rc, out = run(["/usr/sbin/wpa_cli", "-p", c.ctrl, "-i", c.iface, "bss", bssid], 8)
     if rc != 0:
         return {"error": out.strip()[:200]}
@@ -381,20 +393,58 @@ def p_neighbours(c: Ctx) -> dict[str, Any]:
 
 @probe("reachability", "active")
 def p_reachability(c: Ctx) -> dict[str, Any]:
-    """Three pings to the head unit. Doubles as the guard for everything after."""
+    """Who on this link will answer, and how fast.
+
+    The first version pinged the IPv4 gateway and declared the link dead when
+    nothing came back. It could never have worked: carplayd runs the car link
+    IPv6-only on purpose, so the box has no IPv4 address and no route, and the
+    probe was measuring its own absence. Worse, it treated that as "the link is
+    struggling" and cancelled every probe after it.
+
+    Now it asks three different questions and only the *answers* can fail it.
+    """
     if c.dry_run:
-        return {"would_run": f"ping -c3 {c.gw4}"}
-    c.budget.spend(3)
-    rc, out = run(["ping", "-c", "3", "-i", "0.3", "-W", "1", "-I", c.iface, c.gw4], 8)
-    m = re.search(r"= ([\d.]+)/([\d.]+)/([\d.]+)", out)
-    loss = re.search(r"(\d+)% packet loss", out)
-    res: dict[str, Any] = {"reachable": rc == 0}
-    if m:
-        res.update(rtt_min_ms=float(m.group(1)), rtt_avg_ms=float(m.group(2)),
-                   rtt_max_ms=float(m.group(3)))
-    if loss:
-        res["loss_pct"] = int(loss.group(1))
-    return res
+        return {"would_run": "ping6 head unit link-local, ping6 phone"}
+    out: dict[str, Any] = {"targets": {}}
+    link = p_link(c)
+    targets: list[tuple[str, str]] = []
+    hu_ll = eui64_ll(link.get("bssid", ""))
+    if hu_ll:
+        targets.append(("head_unit_v6", f"{hu_ll}%{c.iface}"))
+    for addr in neighbour_v6(c.iface)[:2]:
+        targets.append(("phone_v6", f"{addr}%{c.iface}" if addr.startswith("fe80") else addr))
+
+    for label, addr in targets:
+        if not c.budget.ok(4):
+            break
+        c.budget.spend(2)
+        rc, text = run(["ping", "-6", "-c", "2", "-i", "0.3", "-W", "1", addr], 6)
+        m = re.search(r"= ([\d.]+)/([\d.]+)/([\d.]+)", text)
+        entry: dict[str, Any] = {"address": addr.split("%")[0], "answered": rc == 0}
+        if m:
+            entry["rtt_avg_ms"] = float(m.group(2))
+        out["targets"][label] = entry
+
+    if c.v4_source:
+        c.budget.spend(2)
+        rc, text = run(["ping", "-c", "2", "-i", "0.3", "-W", "1",
+                        "-I", c.iface, c.gw4], 6)
+        m = re.search(r"= ([\d.]+)/([\d.]+)/([\d.]+)", text)
+        entry: dict[str, Any] = {"address": c.gw4, "answered": rc == 0}
+        if m:
+            entry["rtt_avg_ms"] = float(m.group(2))
+        out["targets"]["head_unit_v4"] = entry
+
+    answered = [t for t in out["targets"].values() if t.get("answered")]
+    rtts = [t["rtt_avg_ms"] for t in answered if "rtt_avg_ms" in t]
+    out["any_answer"] = bool(answered)
+    if rtts:
+        out["rtt_avg_ms"] = max(rtts)
+    # Nothing answering is not evidence of a struggling link -- plenty of
+    # devices simply do not reply to ICMP. Only a measured, bad round trip
+    # stops the rest of the suite.
+    out["verdict"] = "degraded" if rtts and max(rtts) > RTT_ABORT_MS else "ok"
+    return out
 
 
 @probe("dhcp", "active")
@@ -461,40 +511,79 @@ def p_dhcp(c: Ctx) -> dict[str, Any]:
     }
 
 
-@probe("mdns", "active")
+@probe("mdns", "passive")
 def p_mdns(c: Ctx) -> dict[str, Any]:
-    """CarPlay discovery is Bonjour, so there is a responder on this link.
+    """Listen for Bonjour on the car link. Sends nothing.
 
-    What an NBT EVO puts in its TXT records is unpublished. AirPlay responders
-    commonly advertise `model`, `manufacturer`, `srcvers` and `deviceid`, and
-    any of those would name the head unit outright.
+    Two things forced this shape. avahi-daemon on the box only watches the
+    wired interface, so `avahi-browse` never saw this link at all -- it was
+    reporting the house. And the head unit is IPv4-only here while the box is
+    IPv6-only, so no ordinary socket can join the IPv4 multicast group.
+
+    A raw capture sidesteps both: it reads the frames the radio is receiving
+    anyway, from either address family, with nothing transmitted. CarPlay's
+    own service discovery is Bonjour, so there is traffic here to hear.
     """
+    seconds = min(12.0, max(4.0, c.budget.left() / 4))
     if c.dry_run:
-        return {"would_run": "avahi-browse -artp"}
-    if not c.budget.ok(8):
-        return {"skipped": "out of budget"}
-    c.budget.spend(4)
-    rc, out = run(["avahi-browse", "-artp"], min(20.0, c.budget.left()))
-    if rc not in (0, 124):
-        return {"error": out.strip()[:200] or "avahi-browse unavailable"}
-    services, txt = [], {}
-    for line in out.splitlines():
-        parts = line.split(";")
-        if len(parts) < 6 or parts[1] != c.iface:
-            continue
-        if parts[0] == "=" and len(parts) >= 10:
-            services.append({"name": parts[3], "type": parts[4],
-                             "host": parts[6], "address": parts[7],
-                             "port": parts[8], "txt": parts[9][:600]})
-            for kv in re.findall(r'"([^"]+)"', parts[9]):
-                k, _, v = kv.partition("=")
-                txt.setdefault(k, v)
-        elif parts[0] == "+" and len(parts) >= 5:
-            services.append({"name": parts[3], "type": parts[4]})
-    return {"count": len(services), "services": services[:40],
-            "txt_keys": sorted(txt)[:40], "interesting": {
-                k: txt[k] for k in ("model", "manufacturer", "srcvers", "deviceid",
-                                    "features", "fv", "vv", "osvers") if k in txt}}
+        return {"would_run": f"passive 5353 capture on {c.iface} for {seconds:.0f}s"}
+    try:
+        s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003))
+        s.bind((c.iface, 0))
+        s.settimeout(1.0)
+    except (OSError, AttributeError) as exc:
+        return {"error": f"raw capture unavailable: {exc}"}
+    records: list[dict[str, Any]] = []
+    seen_src: set[str] = set()
+    frames = 0
+    t_end = time.monotonic() + seconds
+    try:
+        while time.monotonic() < t_end:
+            try:
+                frame = s.recv(4096)
+            except socket.timeout:
+                continue
+            frames += 1
+            # Ethernet II; walk to UDP and look for port 5353 either side.
+            if len(frame) < 42:
+                continue
+            etype = struct.unpack_from(">H", frame, 12)[0]
+            if etype == 0x0800 and frame[23] == 17:
+                ihl = (frame[14] & 0x0F) * 4
+                udp = 14 + ihl
+                src = ".".join(str(b) for b in frame[26:30])
+            elif etype == 0x86DD and frame[20] == 17:
+                udp = 54
+                src = socket.inet_ntop(socket.AF_INET6, frame[22:38])
+            else:
+                continue
+            if udp + 8 > len(frame):
+                continue
+            sport, dport = struct.unpack_from(">HH", frame, udp)
+            if 5353 not in (sport, dport):
+                continue
+            seen_src.add(src)
+            for rec in parse_mdns(frame[udp + 8 :]):
+                if rec not in records:
+                    records.append(rec)
+    finally:
+        s.close()
+    txt_all: dict[str, str] = {}
+    for r in records:
+        if r["type"] == "TXT":
+            txt_all.update(r["txt"])
+    services = sorted({r["target"] for r in records if r["type"] == "PTR"})
+    return {
+        "listened_s": round(seconds, 1),
+        "frames_seen": frames,
+        "speakers": sorted(seen_src),
+        "count": len(records),
+        "services": services[:40],
+        "records": records[:40],
+        "interesting": {k: v for k, v in txt_all.items() if k.lower() in
+                        ("model", "manufacturer", "srcvers", "deviceid", "fv",
+                         "osvers", "vv", "features", "protovers", "rsf", "pi")},
+    }
 
 
 @probe("tcp_ports", "active")
@@ -508,6 +597,14 @@ def p_tcp(c: Ctx) -> dict[str, Any]:
     ports = [22, 80, 443, 554, 3689, 5000, 7000, 7100, 8008, 8080, 49152]
     if c.dry_run:
         return {"would_run": f"connect {c.gw4}:{ports}"}
+    if not c.v4_source:
+        # Not a failure, a property of the design: carplayd runs the car link
+        # IPv6-only, so there is no source address to reach the head unit's
+        # IPv4 from, and carplayd drops the replies anyway. --head-unit opens
+        # both, briefly. Without it this stays skipped on purpose.
+        return {"skipped": "needs --head-unit (temporary address + stateful "
+                           "return path); the link is IPv6-only by design",
+                "head_unit_v4": c.gw4}
     open_ports, checked = [], []
     for port in ports:
         if not c.budget.ok(4):
@@ -515,15 +612,17 @@ def p_tcp(c: Ctx) -> dict[str, Any]:
         c.budget.spend(1)
         checked.append(port)
         s = socket.socket()
-        s.settimeout(1.0)
+        s.settimeout(1.2)
         try:
+            s.setsockopt(socket.SOL_SOCKET, 25, c.iface.encode())
+            s.bind((c.v4_source, 0))
             if s.connect_ex((c.gw4, port)) == 0:
                 open_ports.append(port)
         except OSError:
             pass
         finally:
             s.close()
-    return {"checked": checked, "open": open_ports}
+    return {"checked": checked, "open": open_ports, "source": c.v4_source}
 
 
 @probe("http_info", "active")
@@ -535,13 +634,16 @@ def p_http(c: Ctx) -> dict[str, Any]:
     """
     if c.dry_run:
         return {"would_run": "GET /info on any open AirPlay-ish port"}
+    if not c.v4_source:
+        return {"skipped": "needs --head-unit; see tcp_ports"}
     found: dict[str, Any] = {}
     for port in (7000, 7100, 5000, 8080, 80):
         if not c.budget.ok(5):
             break
         c.budget.spend(1)
         try:
-            with socket.create_connection((c.gw4, port), timeout=1.5) as s:
+            with socket.create_connection((c.gw4, port), timeout=1.5,
+                                          source_address=(c.v4_source, 0)) as s:
                 s.sendall(
                     f"GET /info HTTP/1.1\r\nHost: {c.gw4}\r\n"
                     "User-Agent: AirPlay/420.45\r\nConnection: close\r\n\r\n".encode()
@@ -564,11 +666,240 @@ def p_http(c: Ctx) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
+def _dns_name(buf: bytes, off: int, depth: int = 0) -> tuple[str, int]:
+    """Decode a DNS name, following compression pointers."""
+    out: list[str] = []
+    while off < len(buf) and depth < 12:
+        ln = buf[off]
+        if ln == 0:
+            return ".".join(out), off + 1
+        if ln & 0xC0 == 0xC0:
+            ptr = ((ln & 0x3F) << 8) | buf[off + 1]
+            tail, _ = _dns_name(buf, ptr, depth + 1)
+            out.append(tail)
+            return ".".join(out), off + 2
+        out.append(buf[off + 1 : off + 1 + ln].decode("utf-8", "replace"))
+        off += 1 + ln
+    return ".".join(out), off
+
+
+def parse_mdns(payload: bytes) -> list[dict[str, Any]]:
+    """Pull the answer records out of an mDNS message.
+
+    Only the record types that say something about a device: PTR names the
+    service, SRV gives the host and port, TXT is where AirPlay responders put
+    model and manufacturer.
+    """
+    recs: list[dict[str, Any]] = []
+    if len(payload) < 12:
+        return recs
+    qd, an, ns, ar = struct.unpack_from(">HHHH", payload, 4)
+    off = 12
+    for _ in range(qd):
+        _, off = _dns_name(payload, off)
+        off += 4
+    for _ in range(an + ns + ar):
+        if off >= len(payload):
+            break
+        name, off = _dns_name(payload, off)
+        if off + 10 > len(payload):
+            break
+        rtype, _cls, _ttl, rdlen = struct.unpack_from(">HHIH", payload, off)
+        off += 10
+        rdata = payload[off : off + rdlen]
+        off += rdlen
+        if rtype == 12:  # PTR
+            target, _ = _dns_name(payload, off - rdlen)
+            recs.append({"type": "PTR", "name": name, "target": target})
+        elif rtype == 33 and rdlen >= 6:  # SRV
+            port = struct.unpack_from(">H", rdata, 4)[0]
+            host, _ = _dns_name(payload, off - rdlen + 6)
+            recs.append({"type": "SRV", "name": name, "port": port, "host": host})
+        elif rtype == 16:  # TXT
+            txt: dict[str, str] = {}
+            i = 0
+            while i < len(rdata):
+                ln = rdata[i]
+                item = rdata[i + 1 : i + 1 + ln].decode("utf-8", "replace")
+                k, _, v = item.partition("=")
+                if k:
+                    txt[k] = v
+                i += 1 + ln
+            recs.append({"type": "TXT", "name": name, "txt": txt})
+    return recs
+
+
+def has_v4(iface: str) -> bool:
+    rc, out = run(["ip", "-4", "-br", "addr", "show", iface], 4)
+    return rc == 0 and bool(re.search(r"\d+\.\d+\.\d+\.\d+", out))
+
+
+def eui64_ll(mac: str) -> str | None:
+    """The link-local address a MAC would have under EUI-64.
+
+    The head unit never sends a router advertisement and never appears in the
+    neighbour cache with an IPv6 address, so if it has IPv6 at all this is
+    where it would be. Worth one packet to find out: an answer would be a new
+    fact about these head units, and silence is also a fact.
+    """
+    try:
+        b = [int(x, 16) for x in mac.split(":")]
+    except (ValueError, AttributeError):
+        return None
+    if len(b) != 6:
+        return None
+    b[0] ^= 0x02
+    return "fe80::%02x%02x:%02xff:fe%02x:%02x%02x" % (b[0], b[1], b[2], b[3], b[4], b[5])
+
+
+def neighbour_v6(iface: str) -> list[str]:
+    """IPv6 neighbours we have actually heard from -- in practice, the phone."""
+    rc, out = run(["ip", "-6", "neigh", "show", "dev", iface], 5)
+    if rc != 0:
+        return []
+    found = []
+    for line in out.splitlines():
+        parts = line.split()
+        if parts and ("REACHABLE" in line or "STALE" in line):
+            found.append(parts[0])
+    return found
+
+
+class HeadUnitAccess:
+    """Make the head unit reachable from the box, briefly and reversibly.
+
+    Three things stand between this box and the head unit, and all three are
+    ours rather than the car's:
+
+      * the car link is IPv6-only by design, so there is no IPv4 source
+        address to speak from;
+      * the house uses the same 172.16.224.0/24, so the main routing table
+        sends anything bound for the head unit out of the wired interface
+        instead -- which is why `noprefixroute` is not optional here. Adding
+        the address the ordinary way would install a /24 route that hijacks
+        every packet the box sends to that range, including real traffic to
+        the house;
+      * carplayd drops everything arriving from the car link, which is the
+        isolation that keeps a car from reaching the box. The head unit was
+        answering pings all along; the replies were being discarded here.
+
+    So this opens the narrowest thing that works: one address that installs no
+    route, and a stateful rule that admits replies to conversations the box
+    itself started. The car link still cannot initiate anything inbound.
+
+    Teardown is the part that matters. Leaving either change behind would
+    weaken the isolation silently, so removal runs in a finally, is verified
+    afterwards, and complains loudly if verification fails.
+    """
+
+    COMMENT = "carplay-wan-probe-temp"
+
+    def __init__(self, iface: str, addr: str, dry_run: bool = False) -> None:
+        self.iface = iface
+        self.addr = addr
+        self.dry_run = dry_run
+        self.added_addr = False
+        self.rule_handle: str | None = None
+        self.problems: list[str] = []
+
+    def _addr_present(self) -> bool:
+        rc, out = run(["ip", "-4", "-br", "addr", "show", self.iface], 4)
+        return rc == 0 and self.addr.split("/")[0] in out
+
+    def __enter__(self) -> HeadUnitAccess:
+        if self.dry_run:
+            return self
+        if self._addr_present():
+            # Someone else's address, or a previous run that did not clean up.
+            # Either way, not ours to remove later.
+            self.problems.append(f"{self.addr} already on {self.iface}; "
+                                 "refusing to manage an address we did not add")
+            return self
+        rc, out = run(["ip", "addr", "add", self.addr, "dev", self.iface,
+                       "noprefixroute"], 6)
+        if rc != 0:
+            self.problems.append(f"could not add address: {out.strip()[:120]}")
+            return self
+        self.added_addr = True
+
+        rc, out = run(["nft", "add", "rule", "inet", "carplayd", "input",
+                       "iifname", self.iface, "ct", "state",
+                       "established,related", "accept",
+                       "comment", f'"{self.COMMENT}"'], 6)
+        if rc != 0:
+            self.problems.append(f"could not add return-path rule: {out.strip()[:120]}")
+            return self
+        rc, out = run(["nft", "-a", "list", "chain", "inet", "carplayd", "input"], 6)
+        for line in out.splitlines():
+            if self.COMMENT in line and "handle" in line:
+                self.rule_handle = line.rsplit("handle", 1)[1].strip()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self.dry_run:
+            return
+        if self.rule_handle:
+            run(["nft", "delete", "rule", "inet", "carplayd", "input",
+                 "handle", self.rule_handle], 6)
+        if self.added_addr:
+            run(["ip", "addr", "del", self.addr, "dev", self.iface], 6)
+
+        # Verify, do not assume. carplayd rebuilds this table on a radio
+        # recovery, so the rule may already be gone -- that is fine. What is
+        # not fine is it still being there.
+        rc, out = run(["nft", "list", "chain", "inet", "carplayd", "input"], 6)
+        if rc == 0 and self.COMMENT in out:
+            self.problems.append("TEARDOWN FAILED: the temporary firewall rule "
+                                 "is still present. Remove it by hand.")
+        if self._addr_present():
+            self.problems.append(f"TEARDOWN FAILED: {self.addr} is still on "
+                                 f"{self.iface}. Remove it by hand.")
+
+    @property
+    def usable(self) -> bool:
+        return self.added_addr and self.rule_handle is not None
+
+
 def iface_up(iface: str) -> bool:
     try:
         return open(f"/sys/class/net/{iface}/operstate").read().strip() == "up"
     except OSError:
         return False
+
+
+def bssid_from_scan(c: Ctx, ssid: str | None) -> str | None:
+    """Find the car's BSSID in the supplicant's scan cache.
+
+    Used after a car is switched off: the association is gone, but the head
+    unit keeps beaconing for a while and those beacons are still in the cache.
+    Reads only; no scan is triggered.
+    """
+    rc, out = run(["/usr/sbin/wpa_cli", "-p", c.ctrl, "-i", c.iface,
+                   "scan_results"], 8)
+    if rc != 0:
+        return None
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 5 and parts[0].count(":") == 5:
+            if ssid is None or parts[4].strip() == ssid:
+                if "CarPlay" in parts[4] or ssid:
+                    return parts[0]
+    return None
+
+
+def wait_for_link(c: Ctx, limit: float) -> float | None:
+    """Block until the radio is associated, or give up.
+
+    Purely passive: it reads `iw link` once a second and sends nothing. The
+    cost of waiting is a few seconds of a session; the cost of not waiting is
+    the entire run, because every interesting probe needs the link.
+    """
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < limit:
+        if iface_up(c.iface) and p_link(c).get("bssid"):
+            return round(time.monotonic() - t0, 1)
+        time.sleep(1.0)
+    return None
 
 
 def self_test(ctrl: str, iface: str) -> int:
@@ -618,8 +949,27 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sibling", help="idle radio to send the WPS probe from")
     ap.add_argument("--ctrl", help="wpa_supplicant control dir")
     ap.add_argument("--gw", default="172.16.224.1")
+    ap.add_argument("--ssid", help="SSID to look for in unassociated mode")
     ap.add_argument("--json", dest="outdir", default="/var/lib/carplay-wan/probe")
     ap.add_argument("--budget", type=float, default=DEFAULT_BUDGET)
+    ap.add_argument("--unassociated", action="store_true",
+                    help="do not wait for a link. For the window after a car "
+                         "is switched off, when the AP is still beaconing but "
+                         "the association is gone")
+    ap.add_argument("--tag", default="", help="label this run in the report")
+    ap.add_argument("--head-unit", action="store_true",
+                    help="briefly make the head unit reachable: a temporary "
+                         "IPv4 address that installs no route, plus a rule "
+                         "admitting replies to connections this box starts. "
+                         "Both are removed on exit and the removal is "
+                         "verified. Off by default: it relaxes the isolation "
+                         "that keeps the car link away from the box")
+    ap.add_argument("--head-unit-addr", default="172.16.224.231/24",
+                    help="the temporary address to use")
+    ap.add_argument("--assoc-wait", type=float, default=25.0,
+                    help="seconds to wait for the radio to associate before "
+                         "giving up (the probe is fired on first sighting, "
+                         "which is earlier than that)")
     ap.add_argument("--only", help="comma-separated probe names")
     ap.add_argument("--dry-run", action="store_true",
                     help="list what would run, send nothing")
@@ -647,8 +997,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.self_test:
         return self_test(ctrl, iface)
 
+    report_tag = args.tag
+    if args.unassociated and not args.dry_run:
+        ctx.bssid_hint = bssid_from_scan(ctx, args.ssid)
+
     report: dict[str, Any] = {
         "version": VERSION,
+        "tag": report_tag,
+        "unassociated": args.unassociated,
         "car": car,
         "iface": iface,
         "started": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -656,13 +1012,34 @@ def main(argv: list[str] | None = None) -> int:
         "probes": {},
     }
 
-    if not args.dry_run and not iface_up(iface):
-        report["aborted"] = f"{iface} is not up; no car to probe"
-        print(json.dumps(report, indent=1))
-        return 0
+    # The agent fires this on first sighting, which is before the radio has
+    # associated -- the AP is seen in a scan seconds before there is a link.
+    # Without this wait every probe would skip with "not associated" and the
+    # one chance at a live head unit would be spent on nothing.
+    if not args.dry_run and not args.unassociated:
+        waited = wait_for_link(ctx, args.assoc_wait)
+        report["waited_for_link_s"] = waited
+        if waited is None:
+            report["aborted"] = (
+                f"{iface} never associated within {args.assoc_wait}s; "
+                "the car was seen but no link came up"
+            )
+            print(json.dumps(report, indent=1))
+            return 0
 
     wanted = set(args.only.split(",")) if args.only else None
     guard_failed = False
+    access = HeadUnitAccess(iface, args.head_unit_addr, dry_run=args.dry_run) \
+        if args.head_unit else None
+
+    if access is not None:
+        access.__enter__()
+        if access.usable:
+            ctx.v4_source = args.head_unit_addr.split("/")[0]
+            report["head_unit_access"] = {"source": ctx.v4_source,
+                                          "rule_handle": access.rule_handle}
+        else:
+            report["head_unit_access"] = {"failed": access.problems}
 
     for name, kind, fn in PROBES:
         if wanted and name not in wanted:
@@ -683,14 +1060,26 @@ def main(argv: list[str] | None = None) -> int:
 
         # The reachability probe is also the gate for everything after it.
         if name == "reachability" and not args.dry_run:
-            rtt = result.get("rtt_avg_ms")
-            if result.get("reachable") is False or (rtt and rtt > RTT_ABORT_MS):
+            if result.get("verdict") == "degraded":
                 guard_failed = True
                 ctx.notes.append(
-                    f"stopped active probing: rtt_avg={rtt} ms, "
-                    f"reachable={result.get('reachable')}. CarPlay shares this "
-                    "channel and comes first."
+                    f"stopped active probing: measured round trip "
+                    f"{result.get('rtt_avg_ms')} ms is over {RTT_ABORT_MS} ms. "
+                    "CarPlay shares this channel and comes first."
                 )
+            elif not result.get("any_answer"):
+                ctx.notes.append(
+                    "nothing answered ICMP on this link. Not treated as a "
+                    "fault: devices are entitled to ignore pings, and the "
+                    "remaining probes do not depend on it."
+                )
+
+    if access is not None:
+        access.__exit__()
+        report.setdefault("head_unit_access", {})["teardown_problems"] = access.problems
+        for problem in access.problems:
+            ctx.notes.append(problem)
+            print(f"headunit_probe: {problem}", file=sys.stderr)
 
     report["packets_sent"] = ctx.budget.packets
     report["seconds_left"] = round(ctx.budget.left(), 1)

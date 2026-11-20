@@ -194,3 +194,104 @@ class TestBudget(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHeadUnitAccess(unittest.TestCase):
+    """The temporary access mode.
+
+    The interesting failure is not "it did not work" -- that is visible and
+    harmless. It is "it worked and then did not clean up", which silently
+    leaves this box reachable from a car network. So the teardown path is what
+    gets the tests.
+    """
+
+    def setUp(self) -> None:
+        import headunit_probe as hp
+
+        self.hp = hp
+        self.calls: list[list[str]] = []
+        self.state = {"addr": False, "rule": False}
+        self._real_run = hp.run
+
+        def fake_run(cmd: list[str], timeout: float) -> tuple[int, str]:
+            self.calls.append(cmd)
+            joined = " ".join(cmd)
+            if cmd[:3] == ["ip", "-4", "-br"]:
+                return 0, "cara UP 172.16.224.231/24" if self.state["addr"] else "cara UP"
+            if joined.startswith("ip addr add"):
+                self.state["addr"] = True
+                return 0, ""
+            if joined.startswith("ip addr del"):
+                self.state["addr"] = False
+                return 0, ""
+            if joined.startswith("nft add rule"):
+                self.state["rule"] = True
+                return 0, ""
+            if joined.startswith("nft -a list chain"):
+                return 0, ('  iifname "cara" ct state established,related accept '
+                           'comment "carplay-wan-probe-temp" # handle 42'
+                           if self.state["rule"] else "")
+            if joined.startswith("nft delete rule"):
+                self.state["rule"] = False
+                return 0, ""
+            if joined.startswith("nft list chain"):
+                return 0, "carplay-wan-probe-temp" if self.state["rule"] else ""
+            return 0, ""
+
+        hp.run = fake_run
+
+    def tearDown(self) -> None:
+        self.hp.run = self._real_run
+
+    def test_sets_up_and_tears_down(self) -> None:
+        with self.hp.HeadUnitAccess("cara", "172.16.224.231/24") as a:
+            self.assertTrue(a.usable)
+            self.assertEqual(a.rule_handle, "42")
+            self.assertTrue(self.state["addr"] and self.state["rule"])
+        self.assertFalse(self.state["addr"], "address must be removed")
+        self.assertFalse(self.state["rule"], "firewall rule must be removed")
+        self.assertEqual(a.problems, [])
+
+    def test_the_address_installs_no_route(self) -> None:
+        """noprefixroute is load-bearing: the house uses this same /24, so an
+        ordinary address would install a route that hijacks real traffic."""
+        with self.hp.HeadUnitAccess("cara", "172.16.224.231/24"):
+            pass
+        add = next(c for c in self.calls if " ".join(c).startswith("ip addr add"))
+        self.assertIn("noprefixroute", add)
+
+    def test_the_rule_is_stateful_only(self) -> None:
+        """Replies to what the box started -- never a way in for the car."""
+        with self.hp.HeadUnitAccess("cara", "172.16.224.231/24"):
+            pass
+        rule = next(c for c in self.calls if " ".join(c).startswith("nft add rule"))
+        self.assertIn("established,related", rule)
+        self.assertIn("accept", rule)
+
+    def test_teardown_happens_even_when_the_probe_raises(self) -> None:
+        with self.assertRaises(RuntimeError):
+            with self.hp.HeadUnitAccess("cara", "172.16.224.231/24"):
+                raise RuntimeError("a probe blew up")
+        self.assertFalse(self.state["addr"])
+        self.assertFalse(self.state["rule"])
+
+    def test_refuses_an_address_it_did_not_add(self) -> None:
+        self.state["addr"] = True
+        with self.hp.HeadUnitAccess("cara", "172.16.224.231/24") as a:
+            self.assertFalse(a.usable)
+        self.assertTrue(any("refusing to manage" in p for p in a.problems))
+        self.assertTrue(self.state["addr"], "someone else's address is left alone")
+
+    def test_a_failed_teardown_is_reported_loudly(self) -> None:
+        a = self.hp.HeadUnitAccess("cara", "172.16.224.231/24")
+        a.__enter__()
+        # Simulate the delete silently failing.
+        self.hp.run = lambda cmd, timeout: (
+            (0, "carplay-wan-probe-temp") if cmd[:3] == ["nft", "list", "chain"]
+            else (0, "cara UP 172.16.224.231/24") if cmd[:3] == ["ip", "-4", "-br"]
+            else (1, "nope")
+        )
+        a.__exit__()
+        self.assertTrue(any("TEARDOWN FAILED" in p for p in a.problems))
+        self.assertEqual(len([p for p in a.problems if "TEARDOWN FAILED" in p]), 2,
+                         "both the rule and the address must be reported")

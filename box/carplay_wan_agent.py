@@ -256,6 +256,7 @@ class CarState:
     last_departure: str | None = None
     last_departure_reason: str | None = None
     detect_seconds: float | None = None
+    post_off_probed: bool = False
 
     @property
     def session_duration(self) -> int | None:
@@ -269,10 +270,12 @@ class Tracker:
     it from different threads."""
 
     def __init__(self, cars: dict[str, str], redact: Redactor,
-                 on_arrival: Callable[[str], None] | None = None) -> None:
+                 on_arrival: Callable[[str], None] | None = None,
+                 on_departure: Callable[[str], None] | None = None) -> None:
         self._lock = threading.Lock()
         self.redact = redact
         self.on_arrival = on_arrival
+        self.on_departure = on_departure
         self.cars = {c: CarState(car=c, name=n) for c, n in cars.items()}
         self.upstream = True
         self.metrics_ok = False
@@ -314,6 +317,14 @@ class Tracker:
             elif name in ("leave", "link_lost"):
                 st.serving = False
                 st.last_departure_reason = self._departure_reason(ev)
+                # The head unit keeps beaconing for a while after the car is
+                # switched off. That window is the only chance to see what the
+                # AP advertises with nothing associated to it, so the probe
+                # gets a second run -- once per session, not once per event.
+                if not st.post_off_probed and self.on_departure is not None:
+                    st.post_off_probed = True
+                    threading.Thread(target=self.on_departure, args=(st.car,),
+                                     daemon=True).start()
             elif name == "gone":
                 self._depart(st, now)
 
@@ -342,6 +353,7 @@ class Tracker:
         st.validated = False
         st.forwarded_bytes = 0
         st.probe_bytes = 0
+        st.post_off_probed = False
         LOG.info("%s arrived (%s)", st.name, ev.event)
         if self.on_arrival is not None:
             # Never inline: a probe that blocks the tailer would make the agent
@@ -696,7 +708,19 @@ def main(argv: list[str] | None = None) -> int:
             except (OSError, subprocess.SubprocessError) as exc:
                 LOG.warning("probe failed: %s", exc)
 
-    tracker = Tracker(names, redact, on_arrival=probe_cb)
+    depart_cb = None
+    if args.probe:
+        def depart_cb(car: str) -> None:  # noqa: F811
+            LOG.info("probe: post-shutdown run for car %s", car)
+            try:
+                subprocess.run([args.probe, car, "--unassociated",
+                                "--tag", "post-off"],
+                               capture_output=True, text=True, timeout=120,
+                               check=False)
+            except (OSError, subprocess.SubprocessError) as exc:
+                LOG.warning("post-shutdown probe failed: %s", exc)
+
+    tracker = Tracker(names, redact, on_arrival=probe_cb, on_departure=depart_cb)
 
     if args.once:
         if not args.watch_dev:
